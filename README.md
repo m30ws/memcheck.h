@@ -9,7 +9,7 @@ A simple C89/C++98 single-file header library for checking memory leaks in your 
 
 /* A lot of code... */
 
-memcheck_stats(NULL); /* NULL for stdout or FILE* for output */
+memcheck_stats(NULL); /* NULL for auto (default: stdout) or FILE* */
 memcheck_cleanup();
 ```
 
@@ -19,7 +19,26 @@ Simply include `memcheck.h` into any of your .c/.cpp files where you want to tra
 You may define `-DMEMCHECK_IGNORE` to prevent all functionality; memcheck functions in your
 code may remain since they will still be defined but as no-op versions of themselves.
 
-Look at `example/` to see one way to use it, or look at the function declarations in the header to see all available features which should more-or-less be documented.
+Look at `example/` to see one way to use it, or look at the function declarations to see all available features which should more-or-less be documented.
+
+```c
+/* User funcs */
+void  memcheck_stats(FILE* fp);          /* Displays numbers of allocations and releases, their byte amounts,
+                                            and locations where they don't match (if any) up until this call.
+                                            FILE* may be passed to output to specific stream; pass NULL to use
+                                            stream set by memcheck_set_status_fp(). (Default: stdout) */
+void  memcheck_set_status_fp(FILE* fp);  /* Set which FILE* to be used for immediate logging messages (allocations and
+                                            releases; also used for memcheck_stats() if not overridden).
+                                            Status_fp defaults to stdout but if NULL is passed to this function output will
+                                            be redirected to /dev/null. This will cause memcheck itself to manage that FILE*.
+                                            If you want to manage the FILE* yourself, open it using fopen() and pass it in here */
+void  memcheck_set_track_mem(bool yn);   /* Whether to perform call tracking (dynamically turn memcheck on and off) */
+void  memcheck_cleanup(void);            /* Destroys the internal memory blocks storage and closes status_fp if memcheck
+                                            is managing it (Only a case when you let it through using memcheck_set_status_fp(NULL)).
+                                            Note: you will NOT get memcheck warnings if you forget to call memcheck_cleanup()! */
+void  memcheck_stats_reset(void);        /* Resets all statistics tracked to 0 */
+FILE* memcheck_get_status_fp(void);      /* Returns the currently used status_fp inside memcheck. (Defaults to stdout) */
+```
 
 ## Preview
 
@@ -106,5 +125,5 @@ Segmentation fault.
 Since this uses `__FILE__` and `__LINE__` macros unfortunately you won't be able to see the full stacktrace. However, you will still be able to get an idea of where the issue is.
 
 ## TODO:
-- Make threadsafe
+- Make thread-safe
 - Improve output formats

@@ -23,16 +23,16 @@
 	
 	----------------------------------------
 	
-	A simple C/C++ single-file header library for checking memory leaks in your app.
+	A simple C89/C++98 single-file header library for checking memory leaks in your app.
 
 	(Very) Basic usage:
 	```
 	  #define MEMCHECK_IMPLEMENTATION
 	  #include "memcheck.h"
 
-	  // A lot of code...
+	  // A lot of code... //
 	
-	  memcheck_stats();
+	  memcheck_stats(NULL);
 	  memcheck_cleanup();
 	```
 	  
@@ -48,7 +48,8 @@
 	  further down to see all available features.
 
 	TODO:
-	  - Make threadsafe
+	  - Make thread-safe
+	  - Improve output formats
 */
 
 #ifndef _MEMCHECK_H_
@@ -68,20 +69,19 @@ extern "C" {
 /* User funcs */
 void  memcheck_stats(FILE* fp);          /* Displays numbers of allocations and releases, their byte amounts,
                                             and locations where they don't match (if any) up until this call.
-                                            FILE* may be passed to output to specific stream;
-                                            pass NULL to use status_fp stream */
-void  memcheck_stats_reset(void);        /* Resets all statistics tracked to 0 */
-void  memcheck_set_track_mem(bool yn);   /* Whether to perform call tracking (dynamically turn memcheck on and off) */
+                                            FILE* may be passed to output to specific stream; pass NULL to use
+                                            stream set by memcheck_set_status_fp(). (Default: stdout) */
 void  memcheck_set_status_fp(FILE* fp);  /* Set which FILE* to be used for immediate logging messages (allocations and
                                             releases; also used for memcheck_stats() if not overridden).
-                                            Status_fp defaults to stdout but CAN be redirected to /dev/null if NULL is
-                                            passed to this function.
-                                            This will cause memcheck itself to manage that FILE*. If you want to manage
-                                            it yourself, open it using fopen and pass it in here */
-FILE* memcheck_get_status_fp(void);      /* Returns the currently used status_fp inside memcheck. (Defaults to stdout) */
+                                            Status_fp defaults to stdout but if NULL is passed to this function output will
+                                            be redirected to /dev/null. This will cause memcheck itself to manage that FILE*.
+                                            If you want to manage the FILE* yourself, open it using fopen() and pass it in here */
+void  memcheck_set_track_mem(bool yn);   /* Whether to perform call tracking (dynamically turn memcheck on and off) */
 void  memcheck_cleanup(void);            /* Destroys the internal memory blocks storage and closes status_fp if memcheck
-                                            is managing it (Only a case when you let memcheck manage /dev/null through status_fp).
-                                            Note: you will not get memcheck warnings if you forget to call memcheck_cleanup() ! */
+                                            is managing it (Only a case when you let it through using memcheck_set_status_fp(NULL)).
+                                            Note: you will NOT get memcheck warnings if you forget to call memcheck_cleanup()! */
+void  memcheck_stats_reset(void);        /* Resets all statistics tracked to 0 */
+FILE* memcheck_get_status_fp(void);      /* Returns the currently used status_fp inside memcheck. (Defaults to stdout) */
 
 /* Internal (but may use explicitly) */
 void* memcheck_malloc(size_t size, const char* file, size_t line);
