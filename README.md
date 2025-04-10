@@ -9,7 +9,7 @@ A simple C/C++ single-file header library for checking memory leaks in your app.
 
 /* A lot of code... */
 
-memcheck_stats();
+memcheck_stats(NULL); /* NULL for stdout or FILE* for output */
 memcheck_cleanup();
 ```
 
