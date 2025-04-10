@@ -1,6 +1,6 @@
 # memcheck.h
 
-A simple C/C++ single-file header library for checking memory leaks in your app.
+A simple C89/C++98 single-file header library for checking memory leaks in your app.
 
 ## (Very) Basic usage:
 ```c
@@ -101,6 +101,9 @@ Of course, if double-free is what actually happened the program will simply segf
 [FREE   ] 000001A25F3CBFA0 {n=0} @ ./src/prog.c L76
 Segmentation fault.
 ```
+
+## Downsides
+Since this uses `__FILE__` and `__LINE__` macros unfortunately you won't be able to see the full stacktrace. However, you will still be able to get an idea of where the issue is.
 
 ## TODO:
 - Make threadsafe
