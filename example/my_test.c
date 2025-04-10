@@ -1,5 +1,6 @@
 /*
-	This file showcases 
+	This gives an example of how to use memcheck.h in a project with multiple .c files.
+ 	You're free to do whatever you want with this code.
 */
 
 #include <stdio.h>
