@@ -3,8 +3,6 @@ MCHK_BIN = ./my_test
 MCHK_MOD = ./some_module.c
 C_STD = c89
 CXX_STD = c++98
-# CC = gcc #clang
-# CXX = g++ #clang++
 CC = clang
 CXX = clang++
 
