@@ -101,7 +101,7 @@ void  memcheck_free(void* ptr, const char* file, size_t line);
 
 #ifdef MEMCHECK_IMPLEMENTATION
 #if defined(MEMCHECK_IMPLEMENTATION_DONE)
-#error "MEMCHECK_IMPLEMENTATION already defined somewhere!"
+#pragma error "MEMCHECK_IMPLEMENTATION already defined somewhere!"
 #else
 
 #define MEMCHECK_IMPLEMENTATION_DONE
@@ -538,9 +538,11 @@ void memcheck_free(void* ptr, const char* file, size_t line)
 			fprintf(memcheck_get_status_fp(), "[FREE   ] [!!] TRYING TO USE FREE ON NONEXISTENT ELEMENT (%p); RAW MALLOC/REALLOC USED SOMEWHERE?\n", ptr);
 			fprintf(memcheck_get_status_fp(), "          [!!] MIGHT CAUSE SEGFAULT (CONTINUING ANYWAY...)\n");
 			fflush(memcheck_get_status_fp());
-			/* But patch it and try to continue anyways */
+			/* But patch it and try to continue anyways (just pretend we had a malloc() with size 0) */
 			meta = memcheck_new_meta(file, line, 0);
 			elem = _memcheck_tou_llist_append(&_memcheck_g_memblocks, ptr, meta, 0,1); 
+			_memcheck_g_stats.n_mallocs += 1;
+			_memcheck_g_stats.n_total_allocs += 1;
 		} else {
 			meta = (_memcheck_meta_t*) elem->dat2;
 		}
@@ -581,7 +583,10 @@ void memcheck_stats(FILE* fp)
 	fprintf(fp, "     Total freeing calls:   %zu\n", _memcheck_g_stats.n_frees);
 	fprintf(fp, "------------------------------------------\n");
 	if (_memcheck_g_stats.n_frees < _memcheck_g_stats.n_total_allocs) {
-		fprintf(fp, " ===>  MISSING: %zd free()'s \n", _memcheck_g_stats.n_total_allocs - _memcheck_g_stats.n_frees);
+		fprintf(fp, " ===> MISSING: %zd free()'s \n", _memcheck_g_stats.n_total_allocs - _memcheck_g_stats.n_frees);
+	} else if (_memcheck_g_stats.n_frees > _memcheck_g_stats.n_total_allocs) {
+		fprintf(fp, " ===> SURPLUS: %zd allocation(s) \n", _memcheck_g_stats.n_frees - _memcheck_g_stats.n_total_allocs);
+		fprintf(fp, " ===> THIS SHOULDN'T HAPPEN, CHECK LOGS \n");
 	} else {
 		fprintf(fp, "                   OK.                  \n");
 	}
@@ -589,8 +594,15 @@ void memcheck_stats(FILE* fp)
 	fprintf(fp, "  - Total alloc'd size:     %zu\n", _memcheck_g_stats.total_alloc_size);
 	fprintf(fp, "  - Total free'd size:      %zu\n", _memcheck_g_stats.total_free_size);
 	fprintf(fp, "------------------------------------------\n");
-	if (_memcheck_g_stats.total_alloc_size > _memcheck_g_stats.total_free_size) {
-		fprintf(fp, " ===>  DIFF: %zd bytes (0x%zx) \n", _memcheck_g_stats.total_alloc_size - _memcheck_g_stats.total_free_size, _memcheck_g_stats.total_alloc_size - _memcheck_g_stats.total_free_size);
+	if (_memcheck_g_stats.total_free_size < _memcheck_g_stats.total_alloc_size) {
+		fprintf(fp, " ===> DIFF: %zd bytes (0x%zx) \n",
+			_memcheck_g_stats.total_alloc_size - _memcheck_g_stats.total_free_size,
+			_memcheck_g_stats.total_alloc_size - _memcheck_g_stats.total_free_size);
+	} else if (_memcheck_g_stats.total_free_size > _memcheck_g_stats.total_alloc_size) {
+		fprintf(fp, " ===> FREE() SURPLUS: %zd bytes (0x%zx) \n",
+			_memcheck_g_stats.total_free_size - _memcheck_g_stats.total_alloc_size,
+			_memcheck_g_stats.total_free_size - _memcheck_g_stats.total_alloc_size);
+		fprintf(fp, " ===> THIS SHOULDN'T HAPPEN, CHECK LOGS \n");
 	} else {
 		fprintf(fp, "                   OK.                  \n");
 	}
