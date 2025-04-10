@@ -14,7 +14,7 @@ memcheck_cleanup();
 ```
 
 Simply include `memcheck.h` into any of your .c/.cpp files where you want to track
-malloc/calloc/realloc/free calls. Make sure to also define `MEMCHECK_IMPLEMENTATION` in only ONE of your files to trigger adding source into it. At any point call `memcheck_stats()` to see a summary of your allocations.
+`malloc`/`calloc`/`realloc`/`free` calls. Make sure to also define `MEMCHECK_IMPLEMENTATION` in only ONE of your files to trigger adding source into it. At any point call `memcheck_stats()` to see a summary of your allocations.
 
 You may define `-DMEMCHECK_IGNORE` to prevent all functionality; memcheck functions in your
 code may remain since they will still be defined but as no-op versions of themselves.
@@ -45,7 +45,7 @@ When all allocations were successfully freed `memcheck_stats()` call looks like:
 ```
 
 ### Errors
-If allocations that weren't matched by calls to free() were encountered output might look similar to this:
+If allocations that weren't matched by calls to `free()` were encountered output might look similar to this:
 ```
 ------------------------------------------
  >      Displaying memcheck stats:      <
