@@ -8,10 +8,11 @@
 #include <time.h>
 
 #define MEMCHECK_IMPLEMENTATION
+/* #define MEMCHECK_NO_OUTPUT */
+/* #define MEMCHECK_PURGE_ON_CLEANUP */
 #include "../memcheck.h"
 
 #include "some_module.h"
-
 
 typedef struct {
 	int a;
@@ -71,8 +72,35 @@ int main(int argc, char const* argv[])
 	printf("Value from module :: %d\n", *val);
 	testing_func_destroy(val);
 
-	/* Display statistics and cleanup internal structures (also releases /dev/null if was used) */
+	/* #### --Manual memblock access-- #### */
+#ifndef MEMCHECK_IGNORE
+	/* (void) malloc(2222); */
+	_memcheck_tou_llist_t* lst = *memcheck_get_memblocks();
+	while (lst) {
+		void* ptr = lst->dat1;
+		_memcheck_meta_t* meta = (_memcheck_meta_t*)(lst->dat2);
+		printf("#### Memblock :: %p, f=%s, l=%zu, s=%zu\n",
+			ptr, meta->file, meta->line, meta->size);
+		lst = lst->prev;
+	}
+#endif
+
+	/* Display statistics */
 	memcheck_stats(NULL /* NULL -> memcheck_get_status_fp() */);
+
+	/* Allocate once more to test purging */
+	
+	printf("==============\nTesting purge:\n==============\n\n");
+	(void) malloc(5555);
+	memcheck_stats(stdout); // Always outputs to stdout //
+
+	memcheck_purge_remaining(); // free() all remaining unfreed allocations //
+
+	printf("\n====================\nStats after purging:\n====================\n");
+	memcheck_stats(stdout);
+	
+
+	/* Cleanup internal structures (also releases /dev/null if was used) */
 	memcheck_cleanup();
 
 	printf("\nDone.\n");

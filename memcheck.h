@@ -44,6 +44,10 @@
 	You may define -DMEMCHECK_IGNORE to prevent all functionality; memcheck functions in your
 	  code may remain since they will still be defined but as no-op versions of themselves.
 
+	Also available:
+	  - MEMCHECK_NO_OUTPUT - disable all "debug" output (memcheck_stats() will still work as normal when called)
+	  - MEMCHECK_PURGE_ON_CLEANUP - when memcheck_cleanup() is called also try to free the remaining memory blocks (if any)
+
 	Look at example/ to see one way to use it or look at the function declarations
 	  further down to see all available features.
 
@@ -62,12 +66,26 @@
 #include <stdbool.h>
 #include <string.h>
 
+
+/********** EMBED TOU_LLIST_T IMPL (extracted from tou.h) **********/
+/* Define _memcheck_tou_llist_t before others for get_memblocks()*/
+typedef struct _memcheck_tou_llist_s
+{
+	struct _memcheck_tou_llist_s* prev;     /**< previous element                     */
+	struct _memcheck_tou_llist_s* next;     /**< next element                         */
+	void* dat1;                 /**< useful data                          */
+	void* dat2;                 /**< useful data                          */
+	char destroy_dat1/* : 1*/;  /**< automatically deallocate this data ? */
+	char destroy_dat2/* : 1*/;  /**< automatically deallocate this data ? */
+} _memcheck_tou_llist_t;
+/********** END TOU_LLIST_T IMPL **********/
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* User funcs */
-void  memcheck_stats(FILE* fp);          /* Displays numbers of allocations and releases, their byte amounts,
+bool  memcheck_stats(FILE* fp);          /* Displays numbers of allocations and releases, their byte amounts,
                                             and locations where they don't match (if any) up until this call.
                                             FILE* may be passed to output to specific stream; pass NULL to use
                                             stream set by memcheck_set_status_fp(). (Default: stdout) */
@@ -76,12 +94,16 @@ void  memcheck_set_status_fp(FILE* fp);  /* Set which FILE* to be used for immed
                                             Status_fp defaults to stdout but if NULL is passed to this function output will
                                             be redirected to /dev/null. This will cause memcheck itself to manage that FILE*.
                                             If you want to manage the FILE* yourself, open it using fopen() and pass it in here */
-void  memcheck_set_track_mem(bool yn);   /* Whether to perform call tracking (dynamically turn memcheck on and off) */
+FILE* memcheck_get_status_fp(void);      /* Returns the currently used status_fp inside memcheck. (Defaults to stdout) */
+void  memcheck_set_tracking(bool yn);    /* Whether to perform call tracking (dynamically turn memcheck on and off) */
 void  memcheck_cleanup(void);            /* Destroys the internal memory blocks storage and closes status_fp if memcheck
                                             is managing it (Only a case when you let it through using memcheck_set_status_fp(NULL)).
+                                            Does NOT attempt to free the remaining memory blocks unless MEMCHECK_PURGE_ON_CLEANUP is defined.
                                             Note: you will NOT get memcheck warnings if you forget to call memcheck_cleanup()! */
 void  memcheck_stats_reset(void);        /* Resets all statistics tracked to 0 */
-FILE* memcheck_get_status_fp(void);      /* Returns the currently used status_fp inside memcheck. (Defaults to stdout) */
+void  memcheck_purge_remaining(void);    /* Attempts to perform free() on all of the remaining memblocks that are being tracked */
+
+_memcheck_tou_llist_t** memcheck_get_memblocks(void); /* Returns a reference to the internal memory blocks storage */
 
 /* Internal (but may use explicitly) */
 void* memcheck_malloc(size_t size, const char* file, size_t line);
@@ -101,22 +123,24 @@ void  memcheck_free(void* ptr, const char* file, size_t line);
 
 #ifdef MEMCHECK_IMPLEMENTATION
 #if defined(MEMCHECK_IMPLEMENTATION_DONE)
-#pragma error "MEMCHECK_IMPLEMENTATION already defined somewhere!"
+#error "MEMCHECK_IMPLEMENTATION already defined somewhere!"
 #else
 
 #define MEMCHECK_IMPLEMENTATION_DONE
+#undef MEMCHECK_IMPLEMENTATION
 #pragma message "-- Memcheck active (implementation)."
 
 #ifdef MEMCHECK_IGNORE
-	void memcheck_stats(FILE* fp)
+	bool memcheck_stats(FILE* fp)
 	{
 		(void)fp;
+		return true;
 	}
 	void memcheck_stats_reset(void)
 	{
 		(void)0;
 	}
-	void memcheck_set_track_mem(bool yn)
+	void memcheck_set_tracking(bool yn)
 	{
 		(void)yn;
 	}
@@ -131,6 +155,14 @@ void  memcheck_free(void* ptr, const char* file, size_t line);
 	void memcheck_cleanup(void)
 	{
 		(void)0;
+	}
+	void memcheck_purge_remaining(void)
+	{
+		(void)0;
+	}
+	_memcheck_tou_llist_t** memcheck_get_memblocks(void)
+	{
+		return NULL;
 	}
 	void* memcheck_malloc(size_t size, const char* file, size_t line)
 	{
@@ -160,23 +192,13 @@ void  memcheck_free(void* ptr, const char* file, size_t line);
 extern "C" {        /* Extern C for llist */
 #endif
 
-typedef struct _memcheck_tou_llist_s
-{
-	struct _memcheck_tou_llist_s* prev;     /**< previous element                     */
-	struct _memcheck_tou_llist_s* next;     /**< next element                         */
-	void* dat1;                 /**< useful data                          */
-	void* dat2;                 /**< useful data                          */
-	char destroy_dat1/* : 1*/;  /**< automatically deallocate this data ? */
-	char destroy_dat2/* : 1*/;  /**< automatically deallocate this data ? */
-} _memcheck_tou_llist;
-
-static _memcheck_tou_llist* _memcheck_tou_llist_append(_memcheck_tou_llist** node_ref, void* dat1, void* dat2, char dat1_is_dynalloc, char dat2_is_dynalloc)
+static _memcheck_tou_llist_t* _memcheck_tou_llist_append(_memcheck_tou_llist_t** node_ref, void* dat1, void* dat2, char dat1_is_dynalloc, char dat2_is_dynalloc)
 {
 	if (node_ref == NULL)
 		return NULL;
 
 	/* Spawn new node */
-	_memcheck_tou_llist* new_node = (_memcheck_tou_llist*) malloc(sizeof(*new_node));
+	_memcheck_tou_llist_t* new_node = (_memcheck_tou_llist_t*) malloc(sizeof(*new_node));
 
 	new_node->prev = NULL;
 	new_node->next = NULL;
@@ -192,7 +214,7 @@ static _memcheck_tou_llist* _memcheck_tou_llist_append(_memcheck_tou_llist** nod
 		return new_node;
 	}
 	/* Given node/list already has something and this node is head */
-	_memcheck_tou_llist* prev_node = (*node_ref);
+	_memcheck_tou_llist_t* prev_node = (*node_ref);
 	if (prev_node->next == NULL) {
 		prev_node->next = new_node; /* Update passed node's .next */
 		new_node->prev = prev_node; /* Update new node's .prev */
@@ -203,7 +225,7 @@ static _memcheck_tou_llist* _memcheck_tou_llist_append(_memcheck_tou_llist** nod
 	/* The given node is now somewhere inbetween (after head) */
 
 	/* Setup new node links */
-	_memcheck_tou_llist* previous_next = prev_node->next; /* Save previously-next node */
+	_memcheck_tou_llist_t* previous_next = prev_node->next; /* Save previously-next node */
 	new_node->prev = prev_node; /* Update new node's .prev to point to the passed node */
 	new_node->next = previous_next; /* Update new node's .next to */
 									/* point to the previously-next node */
@@ -217,7 +239,7 @@ static _memcheck_tou_llist* _memcheck_tou_llist_append(_memcheck_tou_llist** nod
 	return new_node;
 }
 
-static _memcheck_tou_llist* _memcheck_tou_llist_get_tail(_memcheck_tou_llist* list)
+static _memcheck_tou_llist_t* _memcheck_tou_llist_get_tail(_memcheck_tou_llist_t* list)
 {
 	if (!list) return NULL;
 
@@ -227,18 +249,39 @@ static _memcheck_tou_llist* _memcheck_tou_llist_get_tail(_memcheck_tou_llist* li
 	return list;
 }
 
-static _memcheck_tou_llist* _memcheck_tou_llist_get_oldest(_memcheck_tou_llist* list)
+static _memcheck_tou_llist_t* _memcheck_tou_llist_get_head(_memcheck_tou_llist_t* list)
+{
+	if (!list) return NULL;
+
+	while (list->next)
+		list = list->next;
+	
+	return list;
+}
+
+static _memcheck_tou_llist_t* _memcheck_tou_llist_get_oldest(_memcheck_tou_llist_t* list)
 {
 	return _memcheck_tou_llist_get_tail(list);
 }
 
-static _memcheck_tou_llist* _memcheck_tou_llist_get_newer(_memcheck_tou_llist* elem)
+static _memcheck_tou_llist_t* _memcheck_tou_llist_get_older(_memcheck_tou_llist_t* elem)
+{
+	if (elem == NULL) return NULL;
+	return elem->prev;
+}
+
+static _memcheck_tou_llist_t* _memcheck_tou_llist_get_newest(_memcheck_tou_llist_t* list)
+{
+	return _memcheck_tou_llist_get_head(list);
+}
+
+static _memcheck_tou_llist_t* _memcheck_tou_llist_get_newer(_memcheck_tou_llist_t* elem)
 {
 	if (elem == NULL) return NULL;
 	return elem->next;
 }
 
-static _memcheck_tou_llist* _memcheck_tou_llist_find_exactone(_memcheck_tou_llist* list, void* dat1)
+static _memcheck_tou_llist_t* _memcheck_tou_llist_find_exactone(_memcheck_tou_llist_t* list, void* dat1)
 {
 	if (list == NULL)
 		return NULL;
@@ -252,12 +295,12 @@ static _memcheck_tou_llist* _memcheck_tou_llist_find_exactone(_memcheck_tou_llis
 	return NULL;
 }
 
-static unsigned char _memcheck_tou_llist_is_head(_memcheck_tou_llist* elem)
+static unsigned char _memcheck_tou_llist_is_head(_memcheck_tou_llist_t* elem)
 {
 	return elem == NULL || elem->next == NULL;
 }
 
-static _memcheck_tou_llist* _memcheck_tou_llist_pop(_memcheck_tou_llist* elem)
+static _memcheck_tou_llist_t* _memcheck_tou_llist_pop(_memcheck_tou_llist_t* elem)
 {
 	if (!elem) return NULL;
 
@@ -271,7 +314,7 @@ static _memcheck_tou_llist* _memcheck_tou_llist_pop(_memcheck_tou_llist* elem)
 	return elem;
 }
 
-static void _memcheck_tou_llist_free_element(_memcheck_tou_llist* elem)
+static void _memcheck_tou_llist_free_element(_memcheck_tou_llist_t* elem)
 {
 	if (!elem) return;
 
@@ -281,10 +324,10 @@ static void _memcheck_tou_llist_free_element(_memcheck_tou_llist* elem)
 	free(elem);
 }
 
-static _memcheck_tou_llist* _memcheck_tou_llist_remove(_memcheck_tou_llist* elem)
+static _memcheck_tou_llist_t* _memcheck_tou_llist_remove(_memcheck_tou_llist_t* elem)
 {	
-	_memcheck_tou_llist* next = elem->next;
-	_memcheck_tou_llist* prev = elem->prev;
+	_memcheck_tou_llist_t* next = elem->next;
+	_memcheck_tou_llist_t* prev = elem->prev;
 	_memcheck_tou_llist_pop(elem);
 	_memcheck_tou_llist_free_element(elem);
 
@@ -294,7 +337,7 @@ static _memcheck_tou_llist* _memcheck_tou_llist_remove(_memcheck_tou_llist* elem
 		return next; /* if assigned, next will be the new head */
 }
 
-static size_t _memcheck_tou_llist_len(_memcheck_tou_llist* list)
+static size_t _memcheck_tou_llist_len(_memcheck_tou_llist_t* list)
 {
 	if (list == NULL)
 		return 0;
@@ -317,13 +360,13 @@ static size_t _memcheck_tou_llist_len(_memcheck_tou_llist* list)
 	return len;
 }
 
-static void _memcheck_tou_llist_destroy(_memcheck_tou_llist* list)
+static void _memcheck_tou_llist_destroy(_memcheck_tou_llist_t* list)
 {
 	if (!list) return;
 
 	if (list->next == NULL) { /* this is head. */
-		_memcheck_tou_llist* prev;
-		_memcheck_tou_llist* curr = list;
+		_memcheck_tou_llist_t* prev;
+		_memcheck_tou_llist_t* curr = list;
 
 		while (curr != NULL) {
 			prev = curr->prev;
@@ -335,8 +378,8 @@ static void _memcheck_tou_llist_destroy(_memcheck_tou_llist* list)
 		}
 
 	} else { /* this is tail (or inbetween) */
-		_memcheck_tou_llist* next;
-		_memcheck_tou_llist* curr = list;
+		_memcheck_tou_llist_t* next;
+		_memcheck_tou_llist_t* curr = list;
 		
 		while (curr != NULL) {
 			next = curr->next;
@@ -372,14 +415,14 @@ typedef struct {
 	size_t total_free_size;
 } _memcheck_stats_t;
 
-static bool 				_memcheck_g_do_track_mem 		= true; /* Controls current tracking of allocations and releases */
-static FILE* 				_memcheck_g_status_fp 			= NULL; /* FILE* that serves as log for allocations and releases */
-static bool 				_memcheck_g_manages_devnull 	= false; /* Indicator whether this lib needs to keep track of g_status_fp and close it */
-static _memcheck_tou_llist* _memcheck_g_memblocks 			= NULL; /* Main storage for tracking allocations, releases and their locations */
-static _memcheck_stats_t 	_memcheck_g_stats 				= {0}; /* Statistics tracker for allocations and releases to be displayed at the end */
+static bool                   _memcheck_g_do_track_mem    = true; /* Controls current tracking of allocations and releases */
+static FILE*                  _memcheck_g_status_fp       = NULL; /* FILE* that serves as log for allocations and releases */
+static bool                   _memcheck_g_manages_devnull = false; /* Indicator whether this lib needs to keep track of g_status_fp and close it */
+static _memcheck_tou_llist_t* _memcheck_g_memblocks       = NULL; /* Main storage for tracking allocations, releases and their locations */
+static _memcheck_stats_t 	  _memcheck_g_stats           = {0}; /* Statistics tracker for allocations and releases to be displayed at the end */
 
 
-void memcheck_set_track_mem(bool yn)
+void memcheck_set_tracking(bool yn)
 {
 	_memcheck_g_do_track_mem = yn;
 }
@@ -430,11 +473,13 @@ void* memcheck_malloc(size_t size, const char* file, size_t line)
 		return malloc(size);
 	} else {
 
-		memcheck_set_track_mem(false);
+		memcheck_set_tracking(false);
 
 		void* new_ptr = malloc(size);
-		fprintf(memcheck_get_status_fp(), "[MALLOC ] %p {n=%zu} @ %s L%zu\n", new_ptr, size, file, line);
-		fflush(memcheck_get_status_fp());
+		#ifndef MEMCHECK_NO_OUTPUT
+			fprintf(memcheck_get_status_fp(), "[MALLOC ] %p {n=%zu} @ %s L%zu\n", new_ptr, size, file, line);
+			fflush(memcheck_get_status_fp());
+		#endif
 		
 		_memcheck_g_stats.n_mallocs += 1;
 		_memcheck_g_stats.n_total_allocs += 1;
@@ -443,7 +488,7 @@ void* memcheck_malloc(size_t size, const char* file, size_t line)
 		_memcheck_meta_t* meta = memcheck_new_meta(file, line, size);
 		_memcheck_tou_llist_append(&_memcheck_g_memblocks, new_ptr, meta, 0,1);
 		
-		memcheck_set_track_mem(true);
+		memcheck_set_tracking(true);
 		return new_ptr;
 	}
 }
@@ -455,14 +500,16 @@ void* memcheck_calloc(size_t num, size_t size, const char* file, size_t line)
 		return calloc(num, size);
 	} else {
 
-		memcheck_set_track_mem(false);
+		memcheck_set_tracking(false);
 
 		void* new_ptr = calloc(num, size);
 
 		size = num * size; /*calloc size */
 
-		fprintf(memcheck_get_status_fp(), "[CALLOC ] %p {n=%zu} @ %s L%zu\n", new_ptr, size, file, line);
-		fflush(memcheck_get_status_fp());
+		#ifndef MEMCHECK_NO_OUTPUT
+			fprintf(memcheck_get_status_fp(), "[CALLOC ] %p {n=%zu} @ %s L%zu\n", new_ptr, size, file, line);
+			fflush(memcheck_get_status_fp());
+		#endif
 		
 		_memcheck_g_stats.n_callocs += 1;
 		_memcheck_g_stats.n_total_allocs += 1;
@@ -471,7 +518,7 @@ void* memcheck_calloc(size_t num, size_t size, const char* file, size_t line)
 		_memcheck_meta_t* meta = memcheck_new_meta(file, line, size);
 		_memcheck_tou_llist_append(&_memcheck_g_memblocks, new_ptr, meta, 0,1);
 		
-		memcheck_set_track_mem(true);
+		memcheck_set_tracking(true);
 		return new_ptr;
 	}
 }
@@ -483,14 +530,16 @@ void* memcheck_realloc(void* ptr, size_t new_size, const char* file, size_t line
 		return realloc(ptr, new_size);
 	} else {
 
-		memcheck_set_track_mem(false);
+		memcheck_set_tracking(false);
 
 		_memcheck_meta_t* meta;
-		_memcheck_tou_llist* elem = _memcheck_tou_llist_find_exactone(_memcheck_g_memblocks, ptr);
+		_memcheck_tou_llist_t* elem = _memcheck_tou_llist_find_exactone(_memcheck_g_memblocks, ptr);
 		if (!elem) {
 			if (ptr != NULL) {
-				fprintf(memcheck_get_status_fp(), "[REALLOC] [!!] USING REALLOC ON NONEXISTENT ELEMENT (%p); RAW MALLOC/REALLOC USED SOMEWHERE?\n", ptr);
-				fflush(memcheck_get_status_fp());
+				#ifndef MEMCHECK_NO_OUTPUT
+					fprintf(memcheck_get_status_fp(), "[REALLOC] [!!] USING REALLOC ON NONEXISTENT ELEMENT (%p); RAW MALLOC/REALLOC/CALLOC USED SOMEWHERE?\n", ptr);
+					fflush(memcheck_get_status_fp());
+				#endif
 			}
 			/* But patch it and continue anyways */
 			meta = memcheck_new_meta(file, line, 0);
@@ -500,10 +549,11 @@ void* memcheck_realloc(void* ptr, size_t new_size, const char* file, size_t line
 		}
 
 		void* new_ptr = realloc(ptr, new_size);
-		fprintf(memcheck_get_status_fp(), "[REALLOC] %p {n=%zu} --> %p {n=%zu} @ %s L%zu\n", 
-			ptr, meta->size, new_ptr, new_size, file, line);
-
-		fflush(memcheck_get_status_fp());
+		#ifndef MEMCHECK_NO_OUTPUT
+			fprintf(memcheck_get_status_fp(), "[REALLOC] %p {n=%zu} --> %p {n=%zu} @ %s L%zu\n", 
+				ptr, meta->size, new_ptr, new_size, file, line);
+			fflush(memcheck_get_status_fp());
+		#endif
 
 		_memcheck_g_stats.n_reallocs += 1;
 		/* Change in total allocs only if requested size was 0 */
@@ -518,7 +568,7 @@ void* memcheck_realloc(void* ptr, size_t new_size, const char* file, size_t line
 		meta->size = new_size;
 		elem->dat1 = new_ptr;
 		
-		memcheck_set_track_mem(true);
+		memcheck_set_tracking(true);
 		return new_ptr;
 	}
 }
@@ -530,14 +580,16 @@ void memcheck_free(void* ptr, const char* file, size_t line)
 		free(ptr);
 	} else {
 
-		memcheck_set_track_mem(false);
+		memcheck_set_tracking(false);
 
 		_memcheck_meta_t* meta;
-		_memcheck_tou_llist* elem = _memcheck_tou_llist_find_exactone(_memcheck_g_memblocks, ptr);
+		_memcheck_tou_llist_t* elem = _memcheck_tou_llist_find_exactone(_memcheck_g_memblocks, ptr);
 		if (!elem) {
-			fprintf(memcheck_get_status_fp(), "[FREE   ] [!!] TRYING TO USE FREE ON NONEXISTENT ELEMENT (%p); RAW MALLOC/REALLOC USED SOMEWHERE?\n", ptr);
-			fprintf(memcheck_get_status_fp(), "          [!!] MIGHT CAUSE SEGFAULT (CONTINUING ANYWAY...)\n");
-			fflush(memcheck_get_status_fp());
+			#ifndef MEMCHECK_NO_OUTPUT
+				fprintf(memcheck_get_status_fp(), "[FREE   ] [!!] TRYING TO USE FREE ON NONEXISTENT ELEMENT (%p); RAW MALLOC/REALLOC/CALLOC USED SOMEWHERE?\n", ptr);
+				fprintf(memcheck_get_status_fp(), "          [!!] MIGHT CAUSE SEGFAULT (CONTINUING ANYWAY...)\n");
+				fflush(memcheck_get_status_fp());
+			#endif
 			/* But patch it and try to continue anyways (just pretend we had a malloc() with size 0) */
 			meta = memcheck_new_meta(file, line, 0);
 			elem = _memcheck_tou_llist_append(&_memcheck_g_memblocks, ptr, meta, 0,1); 
@@ -547,8 +599,10 @@ void memcheck_free(void* ptr, const char* file, size_t line)
 			meta = (_memcheck_meta_t*) elem->dat2;
 		}
 
-		fprintf(memcheck_get_status_fp(), "[FREE   ] %p {n=%zu} @ %s L%zu\n", ptr, meta->size, file, line);
-		fflush(memcheck_get_status_fp());
+		#ifndef MEMCHECK_NO_OUTPUT
+			fprintf(memcheck_get_status_fp(), "[FREE   ] %p {n=%zu} @ %s L%zu\n", ptr, meta->size, file, line);
+			fflush(memcheck_get_status_fp());
+		#endif
 		free(ptr);
 
 		_memcheck_g_stats.n_frees += 1;
@@ -563,12 +617,12 @@ void memcheck_free(void* ptr, const char* file, size_t line)
 			_memcheck_tou_llist_remove(elem);
 		}
 
-		memcheck_set_track_mem(true);
+		memcheck_set_tracking(true);
 	}
 }
 
 
-void memcheck_stats(FILE* fp)
+bool memcheck_stats(FILE* fp)
 {
 	if (!fp)
 		fp = memcheck_get_status_fp();
@@ -612,12 +666,12 @@ void memcheck_stats(FILE* fp)
 
 	/* All is good, no unfreed elements */
 	if (!_memcheck_g_memblocks || _memcheck_tou_llist_len(_memcheck_g_memblocks) < 1)
-		return;
+		return true;
 
 	/* If unfreed allocation detected, display them. */
-	_memcheck_tou_llist* elem = _memcheck_tou_llist_get_oldest(_memcheck_g_memblocks);
+	_memcheck_tou_llist_t* elem = _memcheck_tou_llist_get_oldest(_memcheck_g_memblocks);
 	fprintf(fp, "\n-=[ UNFREED ALLOCATIONS DETECTED. ]=-\n");
-	fprintf(fp, "\n-=[ Displaying stored remaining elements: ]=-\n\n");
+	fprintf(fp, "\n-=[ Displaying stored remaining elements: ]=-\n");
 	fflush(fp);
 	while (elem) {
 		_memcheck_meta_t* meta = (_memcheck_meta_t*) elem->dat2;
@@ -627,7 +681,8 @@ void memcheck_stats(FILE* fp)
 			elem->dat1, meta->size, meta->file, meta->line, nbytes, nbytes, (char*)elem->dat1);
 		elem = _memcheck_tou_llist_get_newer(elem);
 	}
-	fprintf(fp, "\n-=[ Memcheck elements over. ]=-\n\n");
+	fprintf(fp, "-=[ Memcheck elements over. ]=-\n\n");
+	return false;
 }
 
 
@@ -644,8 +699,53 @@ void memcheck_cleanup(void)
 	if (!_memcheck_g_memblocks)
 		return;
 	_memcheck_meta_t* meta = (_memcheck_meta_t*) _memcheck_g_memblocks->dat2;
+	#ifdef MEMCHECK_PURGE_ON_CLEANUP
+		memcheck_purge_remaining();
+	#endif
 	_memcheck_tou_llist_destroy(_memcheck_g_memblocks);
 	_memcheck_g_memblocks = NULL;
+}
+
+
+void memcheck_purge_remaining(void)
+{
+	if (!_memcheck_g_memblocks)
+		return;
+	_memcheck_tou_llist_t* elem = _memcheck_tou_llist_get_newest(_memcheck_g_memblocks);
+	#ifndef MEMCHECK_NO_OUTPUT
+		fprintf(memcheck_get_status_fp(), "\n-=[! Purging remaining elements... !]=-\n");
+	#endif
+	while (elem) {
+		_memcheck_meta_t* meta = (_memcheck_meta_t*) elem->dat2;
+		#ifndef MEMCHECK_NO_OUTPUT
+			const int nbytes = (meta->size > 20) ? 20 : meta->size;
+			fprintf(memcheck_get_status_fp(), "  %% Freeing %p... {n=%zu} :: FROM: %s ; L%zu  (first %d bytes...  |%.*s|)\n",
+				elem->dat1, meta->size, meta->file, meta->line, nbytes, nbytes, (char*)elem->dat1);
+			fflush(memcheck_get_status_fp());
+		#endif
+		free(elem->dat1);
+		
+		_memcheck_g_stats.n_frees += 1;
+		_memcheck_g_stats.total_free_size += meta->size;
+
+		/* Don't forget to destroy storage otherwise we might get double free's */
+		_memcheck_tou_llist_t* older = _memcheck_tou_llist_get_older(elem);
+		if (_memcheck_tou_llist_is_head(elem)) {
+			_memcheck_g_memblocks = older;
+		}
+		_memcheck_tou_llist_remove(elem);
+		elem = older;
+	}
+
+	#ifndef MEMCHECK_NO_OUTPUT
+		fprintf(memcheck_get_status_fp(), "-=[! Purge done. !]=-\n");
+	#endif
+}
+
+
+_memcheck_tou_llist_t** memcheck_get_memblocks(void)
+{
+	return &_memcheck_g_memblocks;
 }
 
 
