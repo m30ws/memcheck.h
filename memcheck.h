@@ -124,13 +124,14 @@ void  memcheck_free(void* ptr, const char* file, size_t line);
 /*****************************************************************/
 
 #ifdef MEMCHECK_IMPLEMENTATION
-#if defined(MEMCHECK_IMPLEMENTATION_DONE)
-#error "MEMCHECK_IMPLEMENTATION already defined somewhere!"
+#ifdef MEMCHECK_IMPLEMENTATION_DONE
+#warning "MEMCHECK_IMPLEMENTATION already defined somewhere! Skipping..."
 #else
-
 #define MEMCHECK_IMPLEMENTATION_DONE
 #undef MEMCHECK_IMPLEMENTATION
+
 #pragma message "-- Memcheck active (implementation)."
+
 
 #ifdef MEMCHECK_IGNORE
 	bool memcheck_stats(FILE* fp)
