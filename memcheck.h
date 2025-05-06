@@ -63,6 +63,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -96,6 +97,7 @@ void  memcheck_set_status_fp(FILE* fp);  /* Set which FILE* to be used for immed
                                             If you want to manage the FILE* yourself, open it using fopen() and pass it in here */
 FILE* memcheck_get_status_fp(void);      /* Returns the currently used status_fp inside memcheck. (Defaults to stdout) */
 void  memcheck_set_tracking(bool yn);    /* Whether to perform call tracking (dynamically turn memcheck on and off) */
+bool  memcheck_is_tracking(void);        /* Retrieves current setting for controlling call tracking */
 void  memcheck_cleanup(void);            /* Destroys the internal memory blocks storage and closes status_fp if memcheck
                                             is managing it (Only a case when you let it through using memcheck_set_status_fp(NULL)).
                                             Does NOT attempt to free the remaining memory blocks unless MEMCHECK_PURGE_ON_CLEANUP is defined.
@@ -143,6 +145,10 @@ void  memcheck_free(void* ptr, const char* file, size_t line);
 	void memcheck_set_tracking(bool yn)
 	{
 		(void)yn;
+	}
+	bool memcheck_is_tracking(void)
+	{
+		return false;
 	}
 	void memcheck_set_status_fp(FILE* fp)
 	{
@@ -281,7 +287,7 @@ static _memcheck_tou_llist_t* _memcheck_tou_llist_get_newer(_memcheck_tou_llist_
 	return elem->next;
 }
 
-static _memcheck_tou_llist_t* _memcheck_tou_llist_find_exactone(_memcheck_tou_llist_t* list, void* dat1)
+static _memcheck_tou_llist_t* _memcheck_tou_llist_find_exact_one(_memcheck_tou_llist_t* list, void* dat1)
 {
 	if (list == NULL)
 		return NULL;
@@ -428,6 +434,12 @@ void memcheck_set_tracking(bool yn)
 }
 
 
+bool memcheck_is_tracking(void)
+{
+	return _memcheck_g_do_track_mem;
+}
+
+
 /* Only if `fp` is explicitly NULL, system's /dev/null will be used */
 void memcheck_set_status_fp(FILE* fp)
 {
@@ -533,7 +545,7 @@ void* memcheck_realloc(void* ptr, size_t new_size, const char* file, size_t line
 		memcheck_set_tracking(false);
 
 		_memcheck_meta_t* meta;
-		_memcheck_tou_llist_t* elem = _memcheck_tou_llist_find_exactone(_memcheck_g_memblocks, ptr);
+		_memcheck_tou_llist_t* elem = _memcheck_tou_llist_find_exact_one(_memcheck_g_memblocks, ptr);
 		if (!elem) {
 			if (ptr != NULL) {
 				#ifndef MEMCHECK_NO_OUTPUT
@@ -548,10 +560,18 @@ void* memcheck_realloc(void* ptr, size_t new_size, const char* file, size_t line
 			meta = (_memcheck_meta_t*) elem->dat2;
 		}
 
-		void* new_ptr = realloc(ptr, new_size);
+		/* Do output in two parts because using ptr after realloc is UB */
 		#ifndef MEMCHECK_NO_OUTPUT
-			fprintf(memcheck_get_status_fp(), "[REALLOC] %p {n=%zu} --> %p {n=%zu} @ %s L%zu\n", 
-				ptr, meta->size, new_ptr, new_size, file, line);
+			fprintf(memcheck_get_status_fp(), "[REALLOC] %p {n=%zu}",
+				ptr, meta->size);
+			fflush(memcheck_get_status_fp());
+		#endif
+
+		void* new_ptr = realloc(ptr, new_size);
+
+		#ifndef MEMCHECK_NO_OUTPUT
+			fprintf(memcheck_get_status_fp(), " --> %p {n=%zu} @ %s L%zu\n",
+				new_ptr, new_size, file, line);
 			fflush(memcheck_get_status_fp());
 		#endif
 
@@ -583,7 +603,7 @@ void memcheck_free(void* ptr, const char* file, size_t line)
 		memcheck_set_tracking(false);
 
 		_memcheck_meta_t* meta;
-		_memcheck_tou_llist_t* elem = _memcheck_tou_llist_find_exactone(_memcheck_g_memblocks, ptr);
+		_memcheck_tou_llist_t* elem = _memcheck_tou_llist_find_exact_one(_memcheck_g_memblocks, ptr);
 		if (!elem) {
 			#ifndef MEMCHECK_NO_OUTPUT
 				fprintf(memcheck_get_status_fp(), "[FREE   ] [!!] TRYING TO USE FREE ON NONEXISTENT ELEMENT (%p); RAW MALLOC/REALLOC/CALLOC USED SOMEWHERE?\n", ptr);
@@ -698,7 +718,7 @@ void memcheck_cleanup(void)
 		fclose(_memcheck_g_status_fp);
 	if (!_memcheck_g_memblocks)
 		return;
-	_memcheck_meta_t* meta = (_memcheck_meta_t*) _memcheck_g_memblocks->dat2;
+
 	#ifdef MEMCHECK_PURGE_ON_CLEANUP
 		memcheck_purge_remaining();
 	#endif
