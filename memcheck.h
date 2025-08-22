@@ -54,7 +54,7 @@
 	  further down to see all available features.
 
 	TODO:
-	  - instead of removing freed/reallocd addresses from storage, move them to "already-freed" to detect double-free or use-after-free
+	  - instead of removing freed/realloc'd addresses from storage, move them to "already-freed" to detect double-free or use-after-free
 	  - Improve output formats
 */
 
@@ -63,9 +63,12 @@
 
 #pragma message "-- Memcheck active."
 
+#if defined(MEMCHECK_ENABLE_THREADSAFETY) && _POSIX_C_SOURCE < 200809L
+#pragma message "You should probably define _POSIX_C_SOURCE to at least 200809L for pthreads recursive mutex feature (will get removed in the future)"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -137,29 +140,33 @@ extern "C" {
 #endif
 
 /* User funcs */
-bool  memcheck_stats(FILE* fp);          /* Displays numbers of allocations and releases, their byte amounts,
+int   memcheck_stats(FILE* fp);          /* Displays numbers of allocations and releases, their byte amounts,
                                              and locations where they don't match (if any) up until this call.
                                             The FILE* argument may be passed to output to specific stream; pass
-                                             NULL to use the stream set by memcheck_set_status_fp().
-                                            (Default: stdout) */
+                                             NULL to use the stream set by memcheck_set_status_fp(). (Default: stdout)
+                                            Returns 0 if there are still some allocations up to now that weren't freed,
+                                             otherwise returns 1.
+                                         */
 void  memcheck_set_status_fp(FILE* fp);  /* Set which FILE* to be used for immediate logging messages (allocations and
                                             releases; also used for memcheck_stats() if not overridden).
                                             Status_fp variable defaults to stdout but if NULL is passed to this function the output
                                             will be redirected to /dev/null. This will cause memcheck itself to manage that FILE*.
                                             If you want to manage the FILE* yourself, open it using fopen() and pass it in here */
 FILE* memcheck_get_status_fp(void);      /* Returns the currently used status_fp inside memcheck. (Defaults to stdout) */
-void  memcheck_set_tracking(bool yn);    /* Whether to perform call tracking (dynamically turn memcheck on and off) */
-bool  memcheck_is_tracking(void);        /* Retrieves current setting for controlling call tracking */
+void  memcheck_set_tracking(int yn);     /* Whether to perform call tracking (dynamically turn memcheck on and off) (1 = yes, 0 = no) */
+int   memcheck_is_tracking(void);        /* Retrieves current setting for controlling call tracking (1 = yes, 0 = no) */
 void  memcheck_cleanup(void);            /* Destroys the internal memory blocks storage and closes status_fp if memcheck
-                                            is managing it (Only a case when you let it through using memcheck_set_status_fp(NULL)).
+                                            is managing it (Only a case when you let it do so using memcheck_set_status_fp(NULL)).
                                             Does NOT attempt to free the remaining memory blocks unless MEMCHECK_PURGE_ON_CLEANUP is defined.
                                             Note: you will NOT get memcheck warnings if you forget to call memcheck_cleanup()! */
 void  memcheck_stats_reset(void);        /* Resets all statistics tracked to 0 */
 void  memcheck_purge_remaining(void);    /* Attempts to perform free() on all of the remaining memblocks that are being tracked */
 
+/* Special */
 _memcheck_tou_llist_t** memcheck_get_memblocks(void); /* Returns a reference to the internal memory blocks storage */
 
 /* Internal (but may use explicitly) */
+/* If MEMCHECK_IGNORE is defined these will simply pass their parameters to their stdlib counterparts ignoring file and line data */
 void* memcheck_malloc(size_t size, const char* file, size_t line);
 void* memcheck_calloc(size_t num, size_t size, const char* file, size_t line);
 void* memcheck_realloc(void* ptr, size_t new_size, const char* file, size_t line);
@@ -186,22 +193,22 @@ void  memcheck_free(void* ptr, const char* file, size_t line);
 
 
 #ifdef MEMCHECK_IGNORE
-	bool memcheck_stats(FILE* fp)
+	int memcheck_stats(FILE* fp)
 	{
 		(void)fp;
-		return true;
+		return 1;
 	}
 	void memcheck_stats_reset(void)
 	{
 		(void)0;
 	}
-	void memcheck_set_tracking(bool yn)
+	void memcheck_set_tracking(int yn)
 	{
 		(void)yn;
 	}
-	bool memcheck_is_tracking(void)
+	int memcheck_is_tracking(void)
 	{
-		return false;
+		return 0;
 	}
 	void memcheck_set_status_fp(FILE* fp)
 	{
@@ -225,22 +232,23 @@ void  memcheck_free(void* ptr, const char* file, size_t line);
 	}
 	void* memcheck_malloc(size_t size, const char* file, size_t line)
 	{
-		(void)size; (void)file; (void)line;
-		return NULL;
+		(void)file; (void)line;
+		return malloc(size);
 	}
 	void* memcheck_calloc(size_t num, size_t size, const char* file, size_t line)
 	{
-		(void)num; (void)size; (void)file; (void)line;
-		return NULL;
+		(void)file; (void)line;
+		return calloc(num, size);
 	}
 	void* memcheck_realloc(void* ptr, size_t new_size, const char* file, size_t line)
 	{
-		(void)ptr; (void)new_size; (void)file; (void)line;
-		return NULL;
+		(void)file; (void)line;
+		return realloc(ptr, new_size);
 	}
 	void memcheck_free(void* ptr, const char* file, size_t line)
 	{
-		(void)ptr; (void)file; (void)line;
+		(void)file; (void)line;
+		free(ptr);
 	}
 #else
 
@@ -253,11 +261,15 @@ extern "C" {        /* Extern C for llist */
 
 static _memcheck_tou_llist_t* _memcheck_tou_llist_append(_memcheck_tou_llist_t** node_ref, void* dat1, void* dat2, char dat1_is_dynalloc, char dat2_is_dynalloc)
 {
+	_memcheck_tou_llist_t* new_node;
+	_memcheck_tou_llist_t* prev_node;
+	_memcheck_tou_llist_t* previous_next;
+
 	if (node_ref == NULL)
 		return NULL;
 
 	/* Spawn new node */
-	_memcheck_tou_llist_t* new_node = (_memcheck_tou_llist_t*) malloc(sizeof(*new_node));
+	new_node = (_memcheck_tou_llist_t*) malloc(sizeof(*new_node));
 
 	new_node->prev = NULL;
 	new_node->next = NULL;
@@ -273,7 +285,7 @@ static _memcheck_tou_llist_t* _memcheck_tou_llist_append(_memcheck_tou_llist_t**
 		return new_node;
 	}
 	/* Given node/list already has something and this node is head */
-	_memcheck_tou_llist_t* prev_node = (*node_ref);
+	prev_node = (*node_ref);
 	if (prev_node->next == NULL) {
 		prev_node->next = new_node; /* Update passed node's .next */
 		new_node->prev = prev_node; /* Update new node's .prev */
@@ -284,7 +296,7 @@ static _memcheck_tou_llist_t* _memcheck_tou_llist_append(_memcheck_tou_llist_t**
 	/* The given node is now somewhere inbetween (after head) */
 
 	/* Setup new node links */
-	_memcheck_tou_llist_t* previous_next = prev_node->next; /* Save previously-next node */
+	previous_next = prev_node->next; /* Save previously-next node */
 	new_node->prev = prev_node; /* Update new node's .prev to point to the passed node */
 	new_node->next = previous_next; /* Update new node's .next to */
 									/* point to the previously-next node */
@@ -398,10 +410,10 @@ static _memcheck_tou_llist_t* _memcheck_tou_llist_remove(_memcheck_tou_llist_t* 
 
 static size_t _memcheck_tou_llist_len(_memcheck_tou_llist_t* list)
 {
+	size_t len = 0;
+
 	if (list == NULL)
 		return 0;
-
-	size_t len = 0;
 
 	if (list->next == NULL) { /* this is head. */
 		while (list) {
@@ -468,7 +480,7 @@ extern "C" {        /* Extern C for mutex */
 
 /* Mutex will get initialized on the first use of lock() */
 static _memcheck_tou_thread_mutex_t _memcheck_g_mutex;
-static bool                         _memcheck_g_mutex_init_successful = false;
+static int                          _memcheck_g_mutex_init_successful = 0;
 #ifdef _WIN32
 static INIT_ONCE                    _memcheck_g_mutex_init_once = INIT_ONCE_STATIC_INIT;
 #else
@@ -478,16 +490,17 @@ static pthread_once_t               _memcheck_g_mutex_init_once = PTHREAD_ONCE_I
 static int _memcheck_tou_thread_mutex_init(_memcheck_tou_thread_mutex_t* mutex)
 {
 #ifdef _WIN32
-	// Winapi mutexes should be recursive by default ...
+	/* Winapi mutexes should be recursive by default ... */
 	*mutex = CreateMutexA(
 		NULL,              /* default security attributes */
-		false,             /* initially not owned */
+		0,                 /* initially not owned */
 		NULL               /* unnamed mutex */
 	);
 	return (*mutex == NULL) ? GetLastError() : 0;
 #else
-	// ... as opposed to pthreads where we have to specify explicity
-	pthread_mutexattr_t attr = {0};
+	/* ... as opposed to pthreads where we have to specify explicity */
+	pthread_mutexattr_t attr;
+	memset(&attr, 0, sizeof(pthread_mutexattr_t));
 	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
 	return pthread_mutex_init(mutex, &attr);
 #endif
@@ -508,15 +521,15 @@ static /*bool*/int CALLBACK _memcheck_init_once_callback(INIT_ONCE* once, void* 
 	(void)once; (void)userdata; (void)ctx;
 	
 	if (_memcheck_tou_thread_mutex_init(&_memcheck_g_mutex) != 0)
-		return false;
-	_memcheck_g_mutex_init_successful = true;
-	return true;
+		return 0;
+	_memcheck_g_mutex_init_successful = 1;
+	return 1;
 }
 #else
 static void _memcheck_init_once_callback(void)
 {
 	if (_memcheck_tou_thread_mutex_init(&_memcheck_g_mutex) == 0)
-	    _memcheck_g_mutex_init_successful = true;
+	    _memcheck_g_mutex_init_successful = 1;
 }
 #endif
 
@@ -570,14 +583,14 @@ typedef struct {
 	size_t total_free_size;
 } _memcheck_stats_t;
 
-static bool                         _memcheck_g_do_track_mem    = true; /* Controls current tracking of allocations and releases */
+static int                          _memcheck_g_do_track_mem    = 1; /* Controls current tracking of allocations and releases */
 static FILE*                        _memcheck_g_status_fp       = NULL; /* FILE* that serves as log for allocations and releases */
-static bool                         _memcheck_g_manages_devnull = false; /* Indicator whether this lib needs to keep track of g_status_fp and close it */
+static int                          _memcheck_g_manages_devnull = 0; /* Indicator whether this lib needs to keep track of g_status_fp and close it */
 static _memcheck_tou_llist_t*       _memcheck_g_memblocks       = NULL; /* Main storage for tracking allocations, releases and their locations */
 static _memcheck_stats_t 	        _memcheck_g_stats           = {0}; /* Statistics tracker for allocations and releases to be displayed at the end */
 
 
-void memcheck_set_tracking(bool yn)
+void memcheck_set_tracking(int yn)
 {
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 	if (_memcheck_tou_thread_mutex_lock(&_memcheck_g_mutex) != 0) {
@@ -592,14 +605,15 @@ void memcheck_set_tracking(bool yn)
 }
 
 
-bool memcheck_is_tracking(void)
+int memcheck_is_tracking(void)
 {
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
+	int track;
 	if (_memcheck_tou_thread_mutex_lock(&_memcheck_g_mutex) != 0) {
 		fprintf(stderr, "[%s] Unexpected mutex lock failure\n", __func__);
-		return false;
+		return 0;
 	}
-	bool track = _memcheck_g_do_track_mem;
+	track = _memcheck_g_do_track_mem;
 	_memcheck_tou_thread_mutex_unlock(&_memcheck_g_mutex);
 	return track;
 #else
@@ -623,14 +637,14 @@ void memcheck_set_status_fp(FILE* fp)
 
 	if (fp != NULL) {
 		_memcheck_g_status_fp = fp;
-		_memcheck_g_manages_devnull = false;
+		_memcheck_g_manages_devnull = 0;
 	} else {
 #ifdef _WIN32
 		_memcheck_g_status_fp = fopen("NUL:", "w");
 #else
 		_memcheck_g_status_fp = fopen("/dev/null", "w");
 #endif
-		_memcheck_g_manages_devnull = true;
+		_memcheck_g_manages_devnull = 1;
 	}
 
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
@@ -643,6 +657,7 @@ void memcheck_set_status_fp(FILE* fp)
 FILE* memcheck_get_status_fp(void)
 {
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
+	FILE* fp;
 	if (_memcheck_tou_thread_mutex_lock(&_memcheck_g_mutex) != 0) {
 		fprintf(stderr, "[%s] Unexpected mutex lock failure\n", __func__);
 		return NULL;
@@ -653,7 +668,7 @@ FILE* memcheck_get_status_fp(void)
 		memcheck_set_status_fp(stdout);
 
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
-	FILE* fp = _memcheck_g_status_fp;
+	fp = _memcheck_g_status_fp;
 	_memcheck_tou_thread_mutex_unlock(&_memcheck_g_mutex);
 	return fp;
 #else
@@ -674,19 +689,19 @@ _memcheck_meta_t* memcheck_new_meta(const char* file, size_t line, size_t size)
 
 void* memcheck_malloc(size_t size, const char* file, size_t line)
 {
+	void* new_ptr = NULL; /* Pointer to a new block of memory to be returned
+	                         at the end after releasing mutex (if enabled)  */
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 	if (_memcheck_tou_thread_mutex_lock(&_memcheck_g_mutex) != 0) {
 		fprintf(stderr, "[%s] Unexpected mutex lock failure\n", __func__);
 		return NULL;
 	}
 #endif
-	void* new_ptr = NULL; /* Pointer to a new block of memory to be returned
-	                         at the end after releasing mutex (if enabled)  */
 
 	if (!memcheck_is_tracking()) {
 		new_ptr = malloc(size);		
 	} else {
-		memcheck_set_tracking(false);
+		memcheck_set_tracking(0);
 		
 		new_ptr = malloc(size);
 		
@@ -695,17 +710,17 @@ void* memcheck_malloc(size_t size, const char* file, size_t line)
 			new_ptr, (new_ptr == NULL ? " <SKIPPING>" : ""), size, file, line);
 		fflush(memcheck_get_status_fp());
 #endif
-		// Since we don't want free() to bark at NULL frees, let's not add them in in the first place
+		/* Since we don't want free() to bark at NULL frees, let's not add them in in the first place */
 		if (new_ptr != NULL) {
+			_memcheck_meta_t* meta = memcheck_new_meta(file, line, size);
+			_memcheck_tou_llist_append(&_memcheck_g_memblocks, new_ptr, meta, 0,1);
+
 			_memcheck_g_stats.n_mallocs += 1;
 			_memcheck_g_stats.n_total_allocs += 1;
 			_memcheck_g_stats.total_alloc_size += size;
-
-			_memcheck_meta_t* meta = memcheck_new_meta(file, line, size);
-			_memcheck_tou_llist_append(&_memcheck_g_memblocks, new_ptr, meta, 0,1);
 		}
 
-		memcheck_set_tracking(true);
+		memcheck_set_tracking(1);
 	}
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 	_memcheck_tou_thread_mutex_unlock(&_memcheck_g_mutex);
@@ -716,19 +731,19 @@ void* memcheck_malloc(size_t size, const char* file, size_t line)
 
 void* memcheck_calloc(size_t num, size_t size, const char* file, size_t line)
 {
+	void* new_ptr = NULL; /* Pointer to a new block of memory to be returned
+	                         at the end after releasing mutex (if enabled)  */
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 	if (_memcheck_tou_thread_mutex_lock(&_memcheck_g_mutex) != 0) {
 		fprintf(stderr, "[%s] Unexpected mutex lock failure\n", __func__);
 		return NULL;
 	}
 #endif
-	void* new_ptr = NULL; /* Pointer to a new block of memory to be returned
-	                         at the end after releasing mutex (if enabled)  */
 
 	if (!memcheck_is_tracking()) {
 		new_ptr = calloc(num, size);
 	} else {
-		memcheck_set_tracking(false);
+		memcheck_set_tracking(0);
 
 		new_ptr = calloc(num, size);
 
@@ -740,15 +755,15 @@ void* memcheck_calloc(size_t num, size_t size, const char* file, size_t line)
 		fflush(memcheck_get_status_fp());
 #endif
 		if (new_ptr != NULL) {
+			_memcheck_meta_t* meta = memcheck_new_meta(file, line, size);
+			_memcheck_tou_llist_append(&_memcheck_g_memblocks, new_ptr, meta, 0,1);
+
 			_memcheck_g_stats.n_callocs += 1;
 			_memcheck_g_stats.n_total_allocs += 1;
 			_memcheck_g_stats.total_alloc_size += size;
-
-			_memcheck_meta_t* meta = memcheck_new_meta(file, line, size);
-			_memcheck_tou_llist_append(&_memcheck_g_memblocks, new_ptr, meta, 0,1);
 		}
 		
-		memcheck_set_tracking(true);
+		memcheck_set_tracking(1);
 	}
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 	_memcheck_tou_thread_mutex_unlock(&_memcheck_g_mutex);
@@ -759,24 +774,25 @@ void* memcheck_calloc(size_t num, size_t size, const char* file, size_t line)
 
 void* memcheck_realloc(void* ptr, size_t new_size, const char* file, size_t line)
 {
+	void* new_ptr = NULL; /* Pointer to a new block of memory to be returned
+	                         at the end after releasing mutex (if enabled)  */
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 	if (_memcheck_tou_thread_mutex_lock(&_memcheck_g_mutex) != 0) {
 		fprintf(stderr, "[%s] Unexpected mutex lock failure\n", __func__);
 		return NULL;
 	}
 #endif
-	void* new_ptr = NULL; /* Pointer to a new block of memory to be returned
-	                         at the end after releasing mutex (if enabled)  */
 
 	if (!memcheck_is_tracking()) {
 		new_ptr = realloc(ptr, new_size);
 	} else {
-		memcheck_set_tracking(false);
-
 		_memcheck_meta_t* meta;
-		_memcheck_tou_llist_t* elem = _memcheck_tou_llist_find_exact_one(_memcheck_g_memblocks, ptr);
+		_memcheck_tou_llist_t* elem;
+		memcheck_set_tracking(0);
+
+		elem = _memcheck_tou_llist_find_exact_one(_memcheck_g_memblocks, ptr);
 		if (!elem) {
-#ifndef MEMCHECK_NO_CRITICAL_OUTPUT // #ifndef MEMCHECK_NO_OUTPUT
+#ifndef MEMCHECK_NO_CRITICAL_OUTPUT
 			if (ptr != NULL) {
 				fprintf(stderr/*memcheck_get_status_fp()*/, "[REALLOC] [!!] USING REALLOC ON NONEXISTENT ELEMENT (%p); RAW MALLOC/REALLOC/CALLOC USED SOMEWHERE?\n", ptr);
 				fflush(stderr/*memcheck_get_status_fp()*/);
@@ -817,7 +833,7 @@ void* memcheck_realloc(void* ptr, size_t new_size, const char* file, size_t line
 		meta->size = new_size;
 		elem->dat1 = new_ptr;
 		
-		memcheck_set_tracking(true);
+		memcheck_set_tracking(1);
 		
 	}
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
@@ -838,21 +854,22 @@ void memcheck_free(void* ptr, const char* file, size_t line)
 	if (!memcheck_is_tracking()) {
 		free(ptr);
 	} else {
-		memcheck_set_tracking(false);
-
 		_memcheck_meta_t* meta;
-		_memcheck_tou_llist_t* elem = _memcheck_tou_llist_find_exact_one(_memcheck_g_memblocks, ptr);
+		_memcheck_tou_llist_t* elem;
+		memcheck_set_tracking(0);
+
+		elem = _memcheck_tou_llist_find_exact_one(_memcheck_g_memblocks, ptr);
 		if (!elem) {
 			if (ptr == NULL) {
 				/* Do not bark at null pointers */
-				memcheck_set_tracking(true);
+				memcheck_set_tracking(1);
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 				_memcheck_tou_thread_mutex_unlock(&_memcheck_g_mutex);
 #endif
 				return;
 			}
 
-#ifndef MEMCHECK_NO_CRITICAL_OUTPUT // #ifndef MEMCHECK_NO_OUTPUT
+#ifndef MEMCHECK_NO_CRITICAL_OUTPUT
 			fprintf(stderr/*memcheck_get_status_fp()*/, "[FREE   ] [!!] TRYING TO USE FREE ON NONEXISTENT ELEMENT (%p); RAW MALLOC/REALLOC/CALLOC USED SOMEWHERE?\n"
 			                                            "          [!!] MIGHT CAUSE SEGFAULT (CONTINUING ANYWAY...)\n", ptr);
 			fflush(stderr/*memcheck_get_status_fp()*/);
@@ -884,7 +901,7 @@ void memcheck_free(void* ptr, const char* file, size_t line)
 			_memcheck_tou_llist_remove(elem);
 		}
 
-		memcheck_set_tracking(true);		
+		memcheck_set_tracking(1);
 	}
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 	_memcheck_tou_thread_mutex_unlock(&_memcheck_g_mutex);
@@ -892,12 +909,12 @@ void memcheck_free(void* ptr, const char* file, size_t line)
 }
 
 
-bool memcheck_stats(FILE* fp)
+int memcheck_stats(FILE* fp)
 {
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 	if (_memcheck_tou_thread_mutex_lock(&_memcheck_g_mutex) != 0) {
 		fprintf(stderr, "[%s] Unexpected mutex lock failure\n", __func__);
-		return false;
+		return 0;
 	}
 #endif
 	if (!fp)
@@ -945,28 +962,30 @@ bool memcheck_stats(FILE* fp)
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 		_memcheck_tou_thread_mutex_unlock(&_memcheck_g_mutex);
 #endif
-		return true;
+		return 1;
 	}
 
 	/* If unfreed allocation detected, display them. */
-	_memcheck_tou_llist_t* elem = _memcheck_tou_llist_get_oldest(_memcheck_g_memblocks);
-	fprintf(fp, "\n-=[ UNFREED ALLOCATIONS DETECTED. ]=-\n");
-	fprintf(fp, "\n-=[ Displaying stored remaining elements: ]=-\n");
-	fflush(fp);
-	while (elem) {
-		_memcheck_meta_t* meta = (_memcheck_meta_t*) elem->dat2;
-		const int nbytes_default = 20;
-		const int nbytes = (meta->size > nbytes_default) ? nbytes_default : meta->size;
-		fprintf(fp, "  > %p {n=%"_MEMCHECK_TOU_PRIuZ" (0x%"_MEMCHECK_TOU_PRIxZ")} :: FROM: %s ; L%"_MEMCHECK_TOU_PRIuZ"  (first %d bytes...  |%.*s|)\n",
-			elem->dat1, meta->size, meta->size, meta->file, meta->line, nbytes, nbytes, (char*)elem->dat1);
-		elem = _memcheck_tou_llist_get_newer(elem);
+	{
+		_memcheck_tou_llist_t* elem = _memcheck_tou_llist_get_oldest(_memcheck_g_memblocks);
+		fprintf(fp, "\n-=[ UNFREED ALLOCATIONS DETECTED. ]=-\n");
+		fprintf(fp, "\n-=[ Displaying stored remaining elements: ]=-\n");
+		fflush(fp);
+		while (elem) {
+			_memcheck_meta_t* meta = (_memcheck_meta_t*) elem->dat2;
+			const int nbytes_default = 20;
+			const int nbytes = (meta->size > nbytes_default) ? nbytes_default : meta->size;
+			fprintf(fp, "  > %p {n=%"_MEMCHECK_TOU_PRIuZ" (0x%"_MEMCHECK_TOU_PRIxZ")} :: FROM: %s ; L%"_MEMCHECK_TOU_PRIuZ"  (first %d bytes...  |%.*s|)\n",
+				elem->dat1, meta->size, meta->size, meta->file, meta->line, nbytes, nbytes, (char*)elem->dat1);
+			elem = _memcheck_tou_llist_get_newer(elem);
+		}
+		fprintf(fp, "-=[ Memcheck elements over. ]=-\n\n");
 	}
-	fprintf(fp, "-=[ Memcheck elements over. ]=-\n\n");
 	
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 	_memcheck_tou_thread_mutex_unlock(&_memcheck_g_mutex);
 #endif
-	return false;
+	return 0;
 }
 
 
@@ -1020,6 +1039,7 @@ void memcheck_cleanup(void)
 
 void memcheck_purge_remaining(void)
 {
+	_memcheck_tou_llist_t* elem;
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 	if (_memcheck_tou_thread_mutex_lock(&_memcheck_g_mutex) != 0) {
 		fprintf(stderr, "[%s] Unexpected mutex lock failure\n", __func__);
@@ -1033,13 +1053,14 @@ void memcheck_purge_remaining(void)
 		return;
 	}
 
-	_memcheck_tou_llist_t* elem = _memcheck_tou_llist_get_newest(_memcheck_g_memblocks);
+	elem = _memcheck_tou_llist_get_newest(_memcheck_g_memblocks);
 #ifndef MEMCHECK_NO_OUTPUT
 	fprintf(memcheck_get_status_fp(), "\n-=[! Purging remaining elements... !]=-\n");
 #endif
 
 	while (elem) {
 		_memcheck_meta_t* meta = (_memcheck_meta_t*) elem->dat2;
+		_memcheck_tou_llist_t* older;
 	
 #ifndef MEMCHECK_NO_OUTPUT
 		const int nbytes = (meta->size > 20) ? 20 : meta->size;
@@ -1053,7 +1074,7 @@ void memcheck_purge_remaining(void)
 		_memcheck_g_stats.total_free_size += meta->size;
 
 		/* Don't forget to destroy storage otherwise we might get double free's */
-		_memcheck_tou_llist_t* older = _memcheck_tou_llist_get_older(elem);
+		older = _memcheck_tou_llist_get_older(elem);
 		if (_memcheck_tou_llist_is_head(elem)) {
 			_memcheck_g_memblocks = older;
 		}
@@ -1072,13 +1093,14 @@ void memcheck_purge_remaining(void)
 
 _memcheck_tou_llist_t** memcheck_get_memblocks(void)
 {
+	_memcheck_tou_llist_t** mblk;
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 	if (_memcheck_tou_thread_mutex_lock(&_memcheck_g_mutex) != 0) {
 		fprintf(stderr, "[%s] Unexpected mutex lock failure\n", __func__);
 		return NULL;
 	}
 #endif
-	_memcheck_tou_llist_t** mblk = &_memcheck_g_memblocks;
+	mblk = &_memcheck_g_memblocks;
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 	_memcheck_tou_thread_mutex_unlock(&_memcheck_g_mutex);
 #endif

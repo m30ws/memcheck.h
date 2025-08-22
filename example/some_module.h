@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-int* testing_func_new();
+int* testing_func_new(void);
 void testing_func_destroy(int* ptr);
 
 #ifdef __cplusplus

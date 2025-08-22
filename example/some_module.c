@@ -11,12 +11,12 @@
 
 static int module_counter = 0;
 
-int* testing_func_new()
+int* testing_func_new(void)
 {
 #ifdef __cplusplus
 	int* val = (int*) malloc(sizeof(*val));
 #else
-	int* val = malloc(sizeof(*val));
+	int* val =        malloc(sizeof(*val));
 #endif
 	*val = ++module_counter;
 	return val;
