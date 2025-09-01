@@ -55,13 +55,14 @@
 
 	TODO:
 	  - instead of removing freed/realloc'd addresses from storage, move them to "already-freed" to detect double-free or use-after-free
+	  - add something like memcheck_*alloc_alright() to tell memcheck to still keep track of that allocation, but not yell if it's not freed at the end(and/or even dealloc them automatically?) (ex. for some long-standing allocations which don't make sense if they are not valid for the entire duration of the program) ?
 	  - Improve output formats
 */
 
 #ifndef _MEMCHECK_H_
 #define _MEMCHECK_H_
 
-#pragma message "-- Memcheck active."
+#pragma message ("-- Memcheck active.")
 
 #if defined(MEMCHECK_ENABLE_THREADSAFETY) && _POSIX_C_SOURCE < 200809L
 #pragma message "You should probably define _POSIX_C_SOURCE to at least 200809L for pthreads recursive mutex feature (will get removed in the future)"
@@ -111,7 +112,11 @@ typedef struct _memcheck_tou_llist_s
 /* size_t (%zu) */
 #ifndef _MEMCHECK_TOU_PRIuZ
 #	ifdef _WIN32
+#		ifdef _MSC_VER
+#		define _MEMCHECK_TOU_PRIuZ "zu"
+#		else /* non-msvc */
 #		define _MEMCHECK_TOU_PRIuZ "llu"
+#		endif
 #	else
 #		define _MEMCHECK_TOU_PRIuZ "zu"
 #	endif
@@ -119,7 +124,11 @@ typedef struct _memcheck_tou_llist_s
 /* ssize_t (%zd) */
 #ifndef _MEMCHECK_TOU_PRIdZ
 #	ifdef _WIN32
+#		ifdef _MSC_VER
+#		define _MEMCHECK_TOU_PRIdZ "zd"
+#		else /* non-msvc */
 #		define _MEMCHECK_TOU_PRIdZ "lld"
+#		endif
 #	else
 #		define _MEMCHECK_TOU_PRIdZ "zd"
 #	endif
@@ -127,7 +136,11 @@ typedef struct _memcheck_tou_llist_s
 /* [s]size_t as hex (%zx) */
 #ifndef _MEMCHECK_TOU_PRIxZ
 #	ifdef _WIN32
+#		ifdef _MSC_VER
+#		define _MEMCHECK_TOU_PRIxZ "zx"
+#		else /* non-msvc */
 #		define _MEMCHECK_TOU_PRIxZ "llx"
+#		endif
 #	else
 #		define _MEMCHECK_TOU_PRIxZ "zx"
 #	endif
@@ -189,7 +202,7 @@ void  memcheck_free(void* ptr, const char* file, size_t line);
 #define MEMCHECK_IMPLEMENTATION_DONE
 #undef MEMCHECK_IMPLEMENTATION
 
-#pragma message "-- Memcheck active (implementation)."
+#pragma message ("-- Memcheck active (implementation).")
 
 
 #ifdef MEMCHECK_IGNORE
@@ -587,7 +600,13 @@ static int                          _memcheck_g_do_track_mem    = 1; /* Controls
 static FILE*                        _memcheck_g_status_fp       = NULL; /* FILE* that serves as log for allocations and releases */
 static int                          _memcheck_g_manages_devnull = 0; /* Indicator whether this lib needs to keep track of g_status_fp and close it */
 static _memcheck_tou_llist_t*       _memcheck_g_memblocks       = NULL; /* Main storage for tracking allocations, releases and their locations */
+#ifdef __cplusplus
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#endif
 static _memcheck_stats_t 	        _memcheck_g_stats           = {0}; /* Statistics tracker for allocations and releases to be displayed at the end */
+#ifdef __cplusplus
+#pragma GCC diagnostic warning "-Wmissing-field-initializers"
+#endif
 
 
 void memcheck_set_tracking(int yn)
@@ -632,8 +651,11 @@ void memcheck_set_status_fp(FILE* fp)
 	}
 #endif
 
-	if (_memcheck_g_manages_devnull && _memcheck_g_status_fp != NULL)
-		fclose(_memcheck_g_status_fp);
+	if (_memcheck_g_status_fp != NULL) {
+		fflush(_memcheck_g_status_fp);
+		if (_memcheck_g_manages_devnull)
+			fclose(_memcheck_g_status_fp);
+	}
 
 	if (fp != NULL) {
 		_memcheck_g_status_fp = fp;
@@ -706,7 +728,7 @@ void* memcheck_malloc(size_t size, const char* file, size_t line)
 		new_ptr = malloc(size);
 		
 #ifndef MEMCHECK_NO_OUTPUT
-		fprintf(memcheck_get_status_fp(), "[MALLOC ] %p%s {n=%"_MEMCHECK_TOU_PRIuZ"} @ %s L%"_MEMCHECK_TOU_PRIuZ"\n",
+		fprintf(memcheck_get_status_fp(), "[MALLOC ] %p%s {n=%" _MEMCHECK_TOU_PRIuZ "} @ %s L%" _MEMCHECK_TOU_PRIuZ "\n",
 			new_ptr, (new_ptr == NULL ? " <SKIPPING>" : ""), size, file, line);
 		fflush(memcheck_get_status_fp());
 #endif
@@ -750,7 +772,7 @@ void* memcheck_calloc(size_t num, size_t size, const char* file, size_t line)
 		size = num * size; /*calloc size */
 
 #ifndef MEMCHECK_NO_OUTPUT
-		fprintf(memcheck_get_status_fp(), "[CALLOC ] %p%s {n=%"_MEMCHECK_TOU_PRIuZ"} @ %s L%"_MEMCHECK_TOU_PRIuZ"\n",
+		fprintf(memcheck_get_status_fp(), "[CALLOC ] %p%s {n=%" _MEMCHECK_TOU_PRIuZ "} @ %s L%" _MEMCHECK_TOU_PRIuZ "\n",
 			new_ptr, (new_ptr == NULL ? " <SKIPPING>" : ""), size, file, line);
 		fflush(memcheck_get_status_fp());
 #endif
@@ -807,7 +829,7 @@ void* memcheck_realloc(void* ptr, size_t new_size, const char* file, size_t line
 
 		/* Do output in two parts because using ptr after realloc is UB */
 #ifndef MEMCHECK_NO_OUTPUT
-		fprintf(memcheck_get_status_fp(), "[REALLOC] %p {n=%"_MEMCHECK_TOU_PRIuZ"}",
+		fprintf(memcheck_get_status_fp(), "[REALLOC] %p {n=%" _MEMCHECK_TOU_PRIuZ "}",
 			ptr, meta->size);
 		fflush(memcheck_get_status_fp());
 #endif
@@ -815,7 +837,7 @@ void* memcheck_realloc(void* ptr, size_t new_size, const char* file, size_t line
 		new_ptr = realloc(ptr, new_size);
 
 #ifndef MEMCHECK_NO_OUTPUT
-		fprintf(memcheck_get_status_fp(), " --> %p {n=%"_MEMCHECK_TOU_PRIuZ"} @ %s L%"_MEMCHECK_TOU_PRIuZ"\n",
+		fprintf(memcheck_get_status_fp(), " --> %p {n=%" _MEMCHECK_TOU_PRIuZ "} @ %s L%" _MEMCHECK_TOU_PRIuZ "\n",
 			new_ptr, new_size, file, line);
 		fflush(memcheck_get_status_fp());
 #endif
@@ -884,7 +906,7 @@ void memcheck_free(void* ptr, const char* file, size_t line)
 		}
 
 #ifndef MEMCHECK_NO_OUTPUT
-		fprintf(memcheck_get_status_fp(), "[FREE   ] %p {n=%"_MEMCHECK_TOU_PRIuZ"} @ %s L%"_MEMCHECK_TOU_PRIuZ"\n", ptr, meta->size, file, line);
+		fprintf(memcheck_get_status_fp(), "[FREE   ] %p {n=%" _MEMCHECK_TOU_PRIuZ "} @ %s L%" _MEMCHECK_TOU_PRIuZ "\n", ptr, meta->size, file, line);
 		fflush(memcheck_get_status_fp());
 #endif
 		free(ptr);
@@ -923,30 +945,30 @@ int memcheck_stats(FILE* fp)
 	fprintf(fp, "\n------------------------------------------\n");
 	fprintf(fp, " >      Displaying memcheck stats:      <\n");
 	fprintf(fp, "------------------------------------------\n");
-	fprintf(fp, "  - malloc()'s:             %"_MEMCHECK_TOU_PRIuZ"\n", _memcheck_g_stats.n_mallocs);
-	fprintf(fp, "  - calloc()'s:             %"_MEMCHECK_TOU_PRIuZ"\n", _memcheck_g_stats.n_callocs);
-	fprintf(fp, "  - realloc()'s:            %"_MEMCHECK_TOU_PRIuZ"\n", _memcheck_g_stats.n_reallocs);
-	fprintf(fp, "     Total acquiring calls: %"_MEMCHECK_TOU_PRIuZ"\n", _memcheck_g_stats.n_total_allocs);
-	fprintf(fp, "     Total freeing calls:   %"_MEMCHECK_TOU_PRIuZ"\n", _memcheck_g_stats.n_frees);
+	fprintf(fp, "  - malloc()'s:             %" _MEMCHECK_TOU_PRIuZ "\n", _memcheck_g_stats.n_mallocs);
+	fprintf(fp, "  - calloc()'s:             %" _MEMCHECK_TOU_PRIuZ "\n", _memcheck_g_stats.n_callocs);
+	fprintf(fp, "  - realloc()'s:            %" _MEMCHECK_TOU_PRIuZ "\n", _memcheck_g_stats.n_reallocs);
+	fprintf(fp, "     Total acquiring calls: %" _MEMCHECK_TOU_PRIuZ "\n", _memcheck_g_stats.n_total_allocs);
+	fprintf(fp, "     Total freeing calls:   %" _MEMCHECK_TOU_PRIuZ "\n", _memcheck_g_stats.n_frees);
 	fprintf(fp, "------------------------------------------\n");
 	if (_memcheck_g_stats.n_frees < _memcheck_g_stats.n_total_allocs) {
-		fprintf(fp, " ===> MISSING: %"_MEMCHECK_TOU_PRIdZ" free()'s \n", _memcheck_g_stats.n_total_allocs - _memcheck_g_stats.n_frees);
+		fprintf(fp, " ===> MISSING: %" _MEMCHECK_TOU_PRIdZ " free()'s \n", _memcheck_g_stats.n_total_allocs - _memcheck_g_stats.n_frees);
 	} else if (_memcheck_g_stats.n_frees > _memcheck_g_stats.n_total_allocs) {
-		fprintf(fp, " ===> SURPLUS: %"_MEMCHECK_TOU_PRIdZ" allocation(s) \n", _memcheck_g_stats.n_frees - _memcheck_g_stats.n_total_allocs);
+		fprintf(fp, " ===> SURPLUS: %" _MEMCHECK_TOU_PRIdZ " allocation(s) \n", _memcheck_g_stats.n_frees - _memcheck_g_stats.n_total_allocs);
 		fprintf(fp, " ===> THIS SHOULDN'T HAPPEN, CHECK LOGS \n");
 	} else {
 		fprintf(fp, "                   OK.                  \n");
 	}
 	fprintf(fp, "------------------------------------------\n");
-	fprintf(fp, "  - Total alloc'd size:     %"_MEMCHECK_TOU_PRIuZ"\n", _memcheck_g_stats.total_alloc_size);
-	fprintf(fp, "  - Total free'd size:      %"_MEMCHECK_TOU_PRIuZ"\n", _memcheck_g_stats.total_free_size);
+	fprintf(fp, "  - Total alloc'd size:     %" _MEMCHECK_TOU_PRIuZ "\n", _memcheck_g_stats.total_alloc_size);
+	fprintf(fp, "  - Total free'd size:      %" _MEMCHECK_TOU_PRIuZ "\n", _memcheck_g_stats.total_free_size);
 	fprintf(fp, "------------------------------------------\n");
 	if (_memcheck_g_stats.total_free_size < _memcheck_g_stats.total_alloc_size) {
-		fprintf(fp, " ===> DIFF: %"_MEMCHECK_TOU_PRIdZ" bytes (0x%"_MEMCHECK_TOU_PRIxZ") \n",
+		fprintf(fp, " ===> DIFF: %" _MEMCHECK_TOU_PRIdZ " bytes (0x%" _MEMCHECK_TOU_PRIxZ ") \n",
 			_memcheck_g_stats.total_alloc_size - _memcheck_g_stats.total_free_size,
 			_memcheck_g_stats.total_alloc_size - _memcheck_g_stats.total_free_size);
 	} else if (_memcheck_g_stats.total_free_size > _memcheck_g_stats.total_alloc_size) {
-		fprintf(fp, " ===> FREE() SURPLUS: %"_MEMCHECK_TOU_PRIdZ" bytes (0x%"_MEMCHECK_TOU_PRIxZ") \n",
+		fprintf(fp, " ===> FREE() SURPLUS: %" _MEMCHECK_TOU_PRIdZ " bytes (0x%" _MEMCHECK_TOU_PRIxZ ") \n",
 			_memcheck_g_stats.total_free_size - _memcheck_g_stats.total_alloc_size,
 			_memcheck_g_stats.total_free_size - _memcheck_g_stats.total_alloc_size);
 		fprintf(fp, " ===> THIS SHOULDN'T HAPPEN, CHECK LOGS \n");
@@ -974,8 +996,9 @@ int memcheck_stats(FILE* fp)
 		while (elem) {
 			_memcheck_meta_t* meta = (_memcheck_meta_t*) elem->dat2;
 			const int nbytes_default = 20;
-			const int nbytes = (meta->size > nbytes_default) ? nbytes_default : meta->size;
-			fprintf(fp, "  > %p {n=%"_MEMCHECK_TOU_PRIuZ" (0x%"_MEMCHECK_TOU_PRIxZ")} :: FROM: %s ; L%"_MEMCHECK_TOU_PRIuZ"  (first %d bytes...  |%.*s|)\n",
+			int nbytes = ((int)meta->size > nbytes_default) ? nbytes_default : (int)meta->size;
+			nbytes = (nbytes < 0) ? nbytes_default : nbytes;
+			fprintf(fp, "  > %p {n=%" _MEMCHECK_TOU_PRIuZ " (0x%" _MEMCHECK_TOU_PRIxZ ")} :: FROM: %s ; L%" _MEMCHECK_TOU_PRIuZ "  (first %d bytes...  |%.*s|)\n",
 				elem->dat1, meta->size, meta->size, meta->file, meta->line, nbytes, nbytes, (char*)elem->dat1);
 			elem = _memcheck_tou_llist_get_newer(elem);
 		}
@@ -1063,8 +1086,10 @@ void memcheck_purge_remaining(void)
 		_memcheck_tou_llist_t* older;
 	
 #ifndef MEMCHECK_NO_OUTPUT
-		const int nbytes = (meta->size > 20) ? 20 : meta->size;
-		fprintf(memcheck_get_status_fp(), "  %% Freeing %p... {n=%"_MEMCHECK_TOU_PRIuZ"} :: FROM: %s ; L%"_MEMCHECK_TOU_PRIuZ"  (first %d bytes...  |%.*s|)\n",
+		const int nbytes_default = 20;
+		int nbytes = ((int)meta->size > nbytes_default) ? nbytes_default : (int)meta->size;
+		nbytes = (nbytes < 0) ? nbytes_default : nbytes;
+		fprintf(memcheck_get_status_fp(), "  %% Freeing %p... {n=%" _MEMCHECK_TOU_PRIuZ "} :: FROM: %s ; L%" _MEMCHECK_TOU_PRIuZ "  (first %d bytes...  |%.*s|)\n",
 			elem->dat1, meta->size, meta->file, meta->line, nbytes, nbytes, (char*)elem->dat1);
 		fflush(memcheck_get_status_fp());
 #endif

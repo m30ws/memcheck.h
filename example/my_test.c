@@ -17,8 +17,12 @@
 
 #include "some_module.h"
 
-#ifndef __cplusplus
-#pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+#ifndef _MSC_VER
+#	pragma GCC diagnostic ignored "-Wunused-variable"
+#	pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#	ifndef __cplusplus
+#		pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+#	endif
 #endif
 
 typedef struct {
@@ -75,7 +79,7 @@ int main(void)
 	/* Call "module" function that allocates some more memory random amount of times */
 	/* This "module" (.c+.h) also contains a #include "memcheck.h" which enables its allocations to be tracked */
 	{
-		srand(time(NULL));
+		srand((unsigned int) time(NULL));
 		int n_calls = rand() % 20;
 		printf("\nCalling module function %d times...\n", n_calls);
 		
@@ -105,7 +109,8 @@ int main(void)
 		while (lst) {
 			void*             ptr  = lst->dat1;
 			_memcheck_meta_t* meta = (_memcheck_meta_t*)(lst->dat2);
-			printf("- Memblock :: %p, f=%s, l=%zu, s=%zu\n", ptr, meta->file, meta->line, meta->size);
+			printf("- Memblock :: %p, f=%s, l=%" _MEMCHECK_TOU_PRIuZ ", s=%" _MEMCHECK_TOU_PRIuZ "\n",
+				ptr, meta->file, meta->line, meta->size);
 			lst = lst->prev;
 		}
 #endif
