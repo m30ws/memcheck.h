@@ -47,14 +47,16 @@
 	Also available:
 	  - MEMCHECK_NO_OUTPUT - disable all "debug" output. this overrides memcheck_set_status_fp() (memcheck_stats() will still work as normal when called)
 	  - MEMCHECK_PURGE_ON_CLEANUP - when memcheck_cleanup() is called also try to free the remaining memory blocks (if any)
-	  - MEMCHECK_ENABLE_THREADSAFETY - enables global mutex and locking when accessing global memcheck resources (TODO: consider making opt-out instead of opt-in?)
+	  - MEMCHECK_ENABLE_THREADSAFETY - enables global mutex and locking when accessing global memcheck resources (TODO: consider making opt-out instead of opt-in?) (! If you're enabling this either make sure memcheck is the first library you include, or make sure to define _POSIX_C_SOURCE=200809L before including any other (standard) library)
 	  - MEMCHECK_NO_CRITICAL_OUTPUT - normally, realloc() and free() call attempts on non-tracked memory address will output warning message even if debug output is disabled; this option prevents it
+	  - MEMCHECK_FIRE_AND_FORGET - L33t "cleanup for me" option (employs either __attribute__((constructor)) or linker sections(msvc)) (Somewhat experimental)
 
 	Look at example/ to see one way to use it, or look at the function declarations
 	  further down to see all available features.
 
 	TODO:
 	  - instead of removing freed/realloc'd addresses from storage, move them to "already-freed" to detect double-free or use-after-free
+	  - refactor to get rid of recursive locking
 	  - add something like memcheck_*alloc_alright() to tell memcheck to still keep track of that allocation, but not yell if it's not freed at the end(and/or even dealloc them automatically?) (ex. for some long-standing allocations which don't make sense if they are not valid for the entire duration of the program) ?
 	  - Improve output formats
 */
@@ -64,14 +66,18 @@
 
 #pragma message ("-- Memcheck active.")
 
-#if defined(MEMCHECK_ENABLE_THREADSAFETY) && _POSIX_C_SOURCE < 200809L
-#pragma message "You should probably define _POSIX_C_SOURCE to at least 200809L for pthreads recursive mutex feature (will get removed in the future)"
+
+#if !defined(_MSC_VER) && defined(MEMCHECK_ENABLE_THREADSAFETY) && _POSIX_C_SOURCE < 200809L
+	#pragma message "Memcheck :: _POSIX_C_SOURCE will be defined to 200809L for pthreads recursive mutex feature"
+	#define _POSIX_C_SOURCE 200809L
 #endif
+
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+
 
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 #ifdef _WIN32
@@ -82,6 +88,13 @@
 #else
 	#include <pthread.h>
 #endif
+#endif
+
+
+/* MSVC provides the type as SSIZE_T (all-caps) */
+#if defined(_MSC_VER) && !defined(ssize_t) && !defined(SSIZE_T_DEFINED)
+	#include <basetsd.h>
+	#define ssize_t SSIZE_T
 #endif
 
 
@@ -1131,6 +1144,71 @@ _memcheck_tou_llist_t** memcheck_get_memblocks(void)
 #endif
 	return mblk;
 }
+
+/**
+	This option acts as a "I don't want to care about cleaning up the library" or as
+	a (certified even c00l3r™) "I want you to pick up my garbage after im done running" option.
+	(Not guaranteed to work)
+*/
+#ifdef MEMCHECK_FIRE_AND_FORGET
+	#ifdef _MSC_VER
+		/* https://stackoverflow.com/questions/1113409/attribute-constructor-equivalent-in-vc */
+		#pragma section(".CRT$XCU",read)
+		#define INITIALIZER2_(f,p) \
+			static void f(void); \
+			__declspec(allocate(".CRT$XCU")) void (*f##_)(void) = f; \
+			__pragma(comment(linker,"/include:" p #f "_")) \
+			static void f(void)
+		#ifdef _WIN64
+			#define INITIALIZER(f) INITIALIZER2_(f,"")
+		#else
+			#define INITIALIZER(f) INITIALIZER2_(f,"_")
+		#endif
+	#else
+		#define INITIALIZER(f) void f(void)
+		__attribute__((constructor)) void _memcheck_constructor(void);
+		__attribute__((destructor))  void _memcheck_destructor(void);
+	#endif
+
+	#ifdef _MSC_VER
+	#pragma optimize("", off)
+	#endif
+
+	void _memcheck_destructor(void)
+	{
+		#ifndef MEMCHECK_NO_OUTPUT
+			fprintf(memcheck_get_status_fp(), "\n-=< Running destructor... >=-\n");
+		#endif
+		#ifndef MEMCHECK_PURGE_ON_CLEANUP
+			memcheck_purge_remaining();
+		#endif
+		memcheck_cleanup();
+		#ifndef MEMCHECK_NO_OUTPUT
+			fprintf(memcheck_get_status_fp(), "\n-=< Done done. >=-\n");
+		#endif
+
+		/* Print if the list was actually erased at the end of program */
+		/* memcheck_stats(stdout); */
+
+		#ifndef _MSC_VER
+		__asm__ volatile("" : : : "memory");
+		#endif
+	}
+
+	/* This will only do special linking on msvc */
+	INITIALIZER(_memcheck_constructor)
+	{
+		#ifdef _MSC_VER
+			atexit(_memcheck_destructor);
+		#else
+			__asm__ volatile("" : : : "memory");
+		#endif
+	}
+
+	#ifdef _MSC_VER
+	#pragma optimize("", on)
+	#endif
+#endif /*  */
 
 
 #endif /* MEMCHECK_IGNORE */

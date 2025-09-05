@@ -5,15 +5,16 @@
 
 /* #define _POSIX_C_SOURCE 200809L /* if MEMCHECK_ENABLE_THREADSAFETY defined */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-
 #define MEMCHECK_IMPLEMENTATION
 /* #define MEMCHECK_NO_OUTPUT */
 /* #define MEMCHECK_PURGE_ON_CLEANUP */
 /* #define MEMCHECK_ENABLE_THREADSAFETY */
+/* #define MEMCHECK_FIRE_AND_FORGET */
 #include "../memcheck.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 
 #include "some_module.h"
 
