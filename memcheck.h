@@ -609,16 +609,19 @@ typedef struct {
 	size_t total_free_size;
 } _memcheck_stats_t;
 
-static int                          _memcheck_g_do_track_mem    = 1; /* Controls current tracking of allocations and releases */
-static FILE*                        _memcheck_g_status_fp       = NULL; /* FILE* that serves as log for allocations and releases */
-static int                          _memcheck_g_manages_devnull = 0; /* Indicator whether this lib needs to keep track of g_status_fp and close it */
-static _memcheck_tou_llist_t*       _memcheck_g_memblocks       = NULL; /* Main storage for tracking allocations, releases and their locations */
+static int                          _memcheck_g_do_track_mem     = 1; /* Controls current tracking of allocations and releases */
+static FILE*                        _memcheck_g_status_fp        = NULL; /* FILE* that serves as log for allocations and releases */
+static int                          _memcheck_g_manages_devnull  = 0; /* Indicator whether this lib needs to keep track of g_status_fp and close it */
+static _memcheck_tou_llist_t*       _memcheck_g_memblocks        = NULL; /* Main storage for tracking allocations, releases and their locations */
 #ifdef __cplusplus
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 #endif
-static _memcheck_stats_t 	        _memcheck_g_stats           = {0}; /* Statistics tracker for allocations and releases to be displayed at the end */
+static _memcheck_stats_t 	        _memcheck_g_stats            = {0}; /* Statistics tracker for allocations and releases to be displayed at the end */
 #ifdef __cplusplus
 #pragma GCC diagnostic warning "-Wmissing-field-initializers"
+#endif
+#ifdef MEMCHECK_FIRE_AND_FORGET
+static int                          _memcheck_g_fnf_cleanup_done = 0; /* Guard against double-cleanup (only against manual+automatic(destructor) cleanups) */
 #endif
 
 
@@ -1042,14 +1045,25 @@ void memcheck_stats_reset(void)
 
 void memcheck_cleanup(void)
 {
+#ifdef MEMCHECK_FIRE_AND_FORGET
+	// Guard against double-cleanup (when FIRE_AND_FORGET is defined but
+	//  memcheck_cleanup() was also called manually before quitting)
+	if (_memcheck_g_fnf_cleanup_done)
+		return;
+	_memcheck_g_fnf_cleanup_done = 1;
+#endif
+
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
 	if (_memcheck_tou_thread_mutex_lock(&_memcheck_g_mutex) != 0) {
 		fprintf(stderr, "[%s] Unexpected mutex lock failure\n", __func__);
 		return;
 	}
 #endif
-	if (_memcheck_g_manages_devnull)
+	if (_memcheck_g_manages_devnull) {
 		fclose(_memcheck_g_status_fp);
+		_memcheck_g_status_fp = NULL;
+		_memcheck_g_manages_devnull = 0;
+	}
 	
 	if (!_memcheck_g_memblocks) {
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
@@ -1090,7 +1104,7 @@ void memcheck_purge_remaining(void)
 	}
 
 	elem = _memcheck_tou_llist_get_newest(_memcheck_g_memblocks);
-#ifndef MEMCHECK_NO_OUTPUT
+#if !defined(MEMCHECK_NO_OUTPUT) && !defined(MEMCHECK_FIRE_AND_FORGET)
 	fprintf(memcheck_get_status_fp(), "\n-=[! Purging remaining elements... !]=-\n");
 #endif
 
@@ -1102,9 +1116,11 @@ void memcheck_purge_remaining(void)
 		const int nbytes_default = 20;
 		int nbytes = ((int)meta->size > nbytes_default) ? nbytes_default : (int)meta->size;
 		nbytes = (nbytes < 0) ? nbytes_default : nbytes;
+	#if !defined(MEMCHECK_FIRE_AND_FORGET)
 		fprintf(memcheck_get_status_fp(), "  %% Freeing %p... {n=%" _MEMCHECK_TOU_PRIuZ "} :: FROM: %s ; L%" _MEMCHECK_TOU_PRIuZ "  (first %d bytes...  |%.*s|)\n",
 			elem->dat1, meta->size, meta->file, meta->line, nbytes, nbytes, (char*)elem->dat1);
 		fflush(memcheck_get_status_fp());
+	#endif
 #endif
 		free(elem->dat1);
 		
@@ -1120,7 +1136,7 @@ void memcheck_purge_remaining(void)
 		elem = older;
 	}
 
-#ifndef MEMCHECK_NO_OUTPUT
+#if !defined(MEMCHECK_NO_OUTPUT) && !defined(MEMCHECK_FIRE_AND_FORGET)
 	fprintf(memcheck_get_status_fp(), "-=[! Purge done. !]=-\n");
 #endif
 #ifdef MEMCHECK_ENABLE_THREADSAFETY
@@ -1176,19 +1192,21 @@ _memcheck_tou_llist_t** memcheck_get_memblocks(void)
 
 	void _memcheck_destructor(void)
 	{
+		// memcheck_purge_remaining() and memcheck_cleanup() are defined so
+		//  they only output logs if FIRE_AND_FORGET is not defined
 		#ifndef MEMCHECK_NO_OUTPUT
-			fprintf(memcheck_get_status_fp(), "\n-=< Running destructor... >=-\n");
+			fprintf(stderr, "\n-=< Running auto-destructor... >=-\n");
 		#endif
 		#ifndef MEMCHECK_PURGE_ON_CLEANUP
 			memcheck_purge_remaining();
 		#endif
 		memcheck_cleanup();
 		#ifndef MEMCHECK_NO_OUTPUT
-			fprintf(memcheck_get_status_fp(), "\n-=< Done done. >=-\n");
+			fprintf(stderr, "-=<         Done done.         >=-\n");
 		#endif
 
 		/* Print if the list was actually erased at the end of program */
-		/* memcheck_stats(stdout); */
+		/* memcheck_stats(stderr); */
 
 		#ifndef _MSC_VER
 		__asm__ volatile("" : : : "memory");
